@@ -10,10 +10,14 @@ import scipy
 import scipy.sparse
 import matplotlib.pyplot as plt
 from collections import namedtuple
-from batch_optimize import *
+np.set_printoptions(precision=4, linewidth=80)
+from numpy.testing import *
 
+
+from parameterization import *
 import pycppad
 #from cvxopt import matrix, spmatrix
+from pykrylov.linop import BlockLinearOperator, DiagonalOperator, ZeroOperator, linop_from_ndarray
 
 def GenerateJacobianFunction(g, x_list, l_list):
   x_sizes = [x.size for x in x_list]
@@ -34,159 +38,27 @@ def GenerateJacobianFunction(g, x_list, l_list):
     return np.split(J, xl_indices, axis=1)
   return g_jacobian
 
-from abc import ABCMeta, abstractmethod
-class LocalParameterization(object):
-  __metaclass__ = ABCMeta
-
-  def __init__(self):
-    self.jacobian = None
-
-  @abstractmethod
-  def GlobalSize(self):
-    """ Size of x """
-
-  @abstractmethod
-  def LocalSize(self):
-    """ Size of delta """
-
-  @abstractmethod
-  def Plus(self, x, delta):
-    """ Generalization of the addition operation.
-
-    x_plus_delta = Plus(x, delta)
-    with the condition that Plus(x, 0) = x.
-    """
-
-  @abstractmethod
-  def ComputeJacobian(self, x):
-    """ Return the GlobalSize() x LocalSize() row-major jacobian matrix.
-        The jacobian of Plus(x, delta) w.r.t delta at delta = 0.
-    """
-
-  def UpdataJacobian(self, x):
-    self.jacobian = self.ComputeJacobian(x)
-
-  def ToLocalJacobian(self, Jx):
-    """ Return J_delta given J_x.
-        Acording to the Chain Rule of differentiation,
-          J_delta = f'(x) * Plus'(x) =  Jx * jacobian
-    """
-    return Jx.dot(self.jacobian)
-
-class IdentityParameterization(LocalParameterization):
-  def __init__(self, size):
-    self.size = size
-    self.jacobian = np.eye(self.size)
-
-  def Plus(self, x, delta):
-    return x + delta
-
-  def GlobalSize(self):
-    return self.size
-
-  def LocalSize(self):
-    return self.size
-
-  def ComputeJacobian(self, x):
-    return self.jacobian
-
-  def ToLocalJacobian(self, Jx):
-    return Jx
-
-  def UpdataJacobian(self, x):
-    pass
-
-class SubsetParameterization(LocalParameterization):
-  def __init__(self, active_parameters_mask):
-    self.active_mask = np.array(active_parameters_mask, bool)
-    self.active_indice, = np.where(self.active_mask)
-
-    self.global_size = len(active_parameters_mask)
-    self.local_size  = len(self.active_indice)
-
-    self.jacobian = np.eye(self.global_size)[:,self.active_indice]
-
-  def Plus(self, x, delta):
-    x_ = x.copy()
-    x_[self.active_indice] += delta
-    return x_
-
-  def ComputeJacobian(self, x):
-    return self.jacobian
-
-  def UpdataJacobian(self, x):
-    pass
-
-  def ToLocalJacobian(self, Jx):
-    return np.compress(self.active_mask, Jx, axis=1)  # = Jx[:, self.active_indice]
-
-  def GlobalSize(self):
-    return self.global_size
-
-  def LocalSize(self):
-    return self.local_size
-
-def test_SubsetParameterization():
-  par = SubsetParameterization([1,0,0])
-  assert(par.GlobalSize() == 3)
-  assert(par.LocalSize()  == 1)
-  assert( np.all( par.ComputeJacobian(None) == np.array([ [1],[0],[0] ]) ) )
-
-class AutoDiffLocalParameterization(LocalParameterization):
-  def __init__(self, plus_func, x0, delta0):
-    self.plus_func = plus_func
-    self.global_size = len(x0)
-    self.local_size  = len(delta0)
-
-    in_var = pycppad.independent( np.hstack( [x0, np.zeros(self.local_size)] ) )
-    x_part, delta_part = np.split(in_var, [self.global_size])
-    out_var = plus_func( x_part, delta_part )
-    jac_func = pycppad.adfun(in_var, out_var).jacobian
-
-    def jac_delta(x):
-      inp = np.hstack( [x0, np.zeros(self.local_size) ])
-      J = jac_func(inp)
-      return J[:, self.global_size:]
-    self.jac_delta = jac_delta
-
-  def Plus(self, x, delta):
-    return self.plus_func(x, delta)
-
-  def ComputeJacobian(self, x):
-    return self.jac_delta(x)
-
-  def GlobalSize(self):
-    return self.global_size
-
-  def LocalSize(self):
-    return self.local_size
-
-def test_AutoDiffLocalParameterization():
-  M = np.random.rand(3, 3)
-  plus_func = lambda x,delta : x + M.dot(delta)
-  x0 = np.empty(3)
-  l0 = np.empty(3)
-  par = AutoDiffLocalParameterization(plus_func, x0, l0)
-  assert( np.all( par.ComputeJacobian(x0) == M ) )
-
-  def SubSetPlus(x, delta):
-    x_ = x.copy()
-    x_[:2] += delta
-    return x_
-  par = AutoDiffLocalParameterization(SubSetPlus, x0, l0[:2 ])
-  assert( np.all( par.ComputeJacobian(x0) == np.eye(3)[:,:2] ) )
-
-
-
 ConstraintBlock = namedtuple('ConstraintBlock', ['g_flat', 'g_jacobian',
-                                                 'r_slc', 'x_var', 'l_var'])
-class VariableBlock():
-  __slots__ = 'addr','data','place','place_local','param'
+                                                 'r_slc', 'x_var', 'l_var','nnz'])
+
+class ArrayID(object):
+  __slots__ = 'addr','data'
   def __init__(self, array):
     if np.isscalar(array):
       raise RuntimeError("Input cannot be scalar, use x=np.empty(1) ")
     self.data = array
     self.addr = array.__array_interface__['data'][0]
+
+  def __hash__(self):
+    return hash(self.addr)
+
+  def __eq__(self, other):
+    return self.data.shape == other.data.shape and self.addr == other.addr
+
+class VariableBlock(ArrayID):
+  __slots__ = 'place','place_local','param'
+  def __init__(self, array):
+    super(VariableBlock, self).__init__(array)
     self.param = IdentityParameterization(array.shape[0])
 
   def SetPlace(self, offset):
@@ -199,12 +71,6 @@ class VariableBlock():
     self.place_local = slice(offset, offset + size)
     return size
 
-  def __hash__(self):
-    return hash(self.addr)
-
-  def __eq__(self, other):
-    return self.data.shape == other.data.shape and self.addr == other.addr
-
 class ObservationBlock(VariableBlock):
   __slots__ = '_sigma','weight'
   def __init__(self, array):
@@ -216,7 +82,7 @@ class ObservationBlock(VariableBlock):
     return self._sigma
 
   @sigma.setter
-  def SetSigma(self, sigma):
+  def sigma(self, sigma):
     self._sigma = sigma
     self.weight = 1./sigma
 
@@ -309,11 +175,19 @@ class GaussHelmertProblem:
       raise RuntimeWarning("Input variable not in the lists")
 
   def SetSigma(self, array, sigma):
-    var = ObservationBlock(array)
-    if var in self.observation_dict:
-      self.observation_dict[var].sigma = sigma
-    else:
-      raise RuntimeWarning("Input variable not in the lists")
+    if not isinstance(array, list):
+      array = [array]
+    if not isinstance(sigma, list):
+      sigma = [sigma]*len(array)
+    elif len(sigma) != array:
+      raise ValueError("number don't match")
+
+    for ar, si in zip(array, sigma):
+      var = ObservationBlock(ar)
+      if var in self.observation_dict:
+        self.observation_dict[var].sigma = si
+      else:
+        raise RuntimeWarning("Input variable not in the lists")
 
   def NumParameters(self):
     return self.parameter_offset
@@ -399,9 +273,10 @@ class GaussHelmertProblem:
 
     r_slc = slice(self.constraint_offset, self.constraint_offset+len(res) )
     self.constraint_offset = r_slc.stop
+    nnz = len(res)*len(var)
 
     self.constraint_blocks.append(
-      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var ))
+      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var,nnz ))
 
   def AddConstraintUsingMD(self, g, g_jac, x_list, l_list):
     """
@@ -434,9 +309,10 @@ class GaussHelmertProblem:
 
     r_slc = slice(self.constraint_offset, self.constraint_offset+len(res) )
     self.constraint_offset = r_slc.stop
+    nnz = len(res)*sum(x_sizes+l_sizes)
 
     self.constraint_blocks.append(
-      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var ))
+      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var,nnz ))
 
   def EvaluateConstraintJacobian(self, x=None, l=None):
     if x is None:
@@ -690,70 +566,26 @@ class GaussHelmertProblem:
       self.variance_factor = cost
     return x, e
 
+  def CountNNZ(self):
+    self.UpdateLocalOffset()
+    dim_x = self.NumReducedParameters()
+    dim_l = self.NumReducedObservations()
+    dim_r = self.NumResiduals()
+    offset =  np.cumsum([0, dim_x, dim_l, dim_r])
+    segment_x = slice(offset[0], offset[1])
+    segment_l = slice(offset[1], offset[2])
+    segment_r = slice(offset[2], offset[3])
+    r_offset = offset[2]
+    l_offset = offset[1]
+    dim_total = offset[-1]
+
+    nnz = 0
+    for cb in self.constraint_blocks:
+      nnz += cb.nnz
+    nnz += self.NumObservations()
 
 
-
-
-#%% ConjugateGradientTrustRegion
-
-def BoundariesIntersections(z, d, trust_radius):
-  """
-  Solve the scalar quadratic equation ||z + t d|| == trust_radius.
-  This is like a line-sphere intersection.
-  Return the two values of t, sorted from low to high.
-  """
-  a = np.dot(d, d)
-  b = 2 * np.dot(z, d)
-  c = np.dot(z, z) - trust_radius**2
-  sqrt_discriminant = np.sqrt(b*b - 4*a*c)
-  ta = (-b - sqrt_discriminant) / (2*a)
-  tb = (-b + sqrt_discriminant) / (2*a)
-  return ta, tb
-
-def ConjugateGradientTrustRegion(A, b, x0, trust_radius):
-  r = b - A.dot(x0)
-  d = r.copy()
-  rTr = r.T.dot(r)
-  thres = 1e-12*rTr
-  delta_x = np.zeros_like(b)
-  hits_boundary = False
-  for it in range(100):
-    Ad = A.dot(d)
-    dAd = d.dot(Ad)
-    # see if non-positive curvature reached
-    if dAd <= 0:
-      # if so, stop, look at the two boundary points.
-      # Find both values of t to get the boundary points such that
-      # ||z + t d|| == trust_radius
-      # and then choose the one with the predicted min value.
-      ta, tb = BoundariesIntersections(delta_x, d, trust_radius)
-      delta_x = delta_x + tb * d
-      hits_boundary = True
-      print "non-positive curvature"
-      break
-
-    alpha = rTr / dAd
-    delta_next = delta_x + alpha * d
-    # see if trust region boundary reached
-    if np.linalg.norm(delta_next) >= trust_radius:
-      ta, tb = BoundariesIntersections(delta_x, d, trust_radius)
-      delta_x = delta_x + tb * d
-      hits_boundary = True
-      print "boundary reached"
-      break
-
-    # still within trust region boundary
-    delta_x = delta_next
-    r = r - alpha*Ad if it%10 else b - A.dot(x0 + delta_x)
-    rTr_old = rTr.copy()
-    rTr = r.T.dot(r)
-    beta = rTr/rTr_old
-    d = r + beta*d
-
-    print np.linalg.norm(r), np.linalg.norm(delta_x)
-    if rTr < thres:
-      break
-  return delta_x, hits_boundary
+    return nnz
 #%%
 def test_AddParameter():
   problem = GaussHelmertProblem()
@@ -891,65 +723,6 @@ def test_SolveWithParam():
 
 #%%
 
-inv = np.linalg.inv
-def skew(v):
-    return np.array([[   0, -v[2],  v[1]],
-                     [ v[2],    0, -v[0]],
-                     [-v[1], v[0],    0 ]])
-def vee(s):
-    return np.array([s[2,1], s[0,2], s[1,0]])
-
-def invT(T):
-    R, t = T[:3, :3], T[:3, 3]
-    Ti = np.eye(4, dtype='d')
-    Ti[:3, :3] = R.T
-    Ti[:3, 3]  = -R.T.dot(t)
-    return Ti
-
-def ax2Rot(r):
-    p = np.linalg.norm(r)
-    if np.abs(p) < 1e-12:
-        return np.eye(3)
-    else:
-        S = skew(r/p)
-        return np.eye(3) + np.sin(p)*S + (1.0-np.cos(p))*S.dot(S)
-
-def Rot2ax(R):
-    tr = np.trace(R)
-    a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
-    an = np.linalg.norm(a)
-    phi= np.arctan2(an, tr-1)
-    if np.abs(phi) < 1e-12:
-        return np.zeros(3,'d')
-    else:
-        return phi/an*a
-
-def rotateX(roll):
-    """rotate around x axis"""
-    return np.array([[1, 0, 0, 0],
-                     [0, np.cos(roll), -np.sin(roll), 0],
-                     [0, np.sin(roll), np.cos(roll), 0],
-                     [0, 0, 0, 1]],'d')
-def rotateY(pitch):
-    """rotate around y axis"""
-    return np.array([[np.cos(pitch), 0, np.sin(pitch),  0],
-                     [0, 1, 0, 0],
-                     [-np.sin(pitch), 0, np.cos(pitch), 0],
-                     [0, 0, 0, 1]],'d')
-
-def rotateZ(yaw):
-    """rotate around z axis"""
-    return np.array([[np.cos(yaw), -np.sin(yaw), 0, 0],
-                     [np.sin(yaw), np.cos(yaw), 0, 0],
-                     [0, 0, 1, 0],
-                     [0, 0, 0, 1]],'d')
-
-def translate(x,y,z):
-    return np.array([[1, 0, 0, x],
-                     [0, 1, 0, y],
-                     [0, 0, 1, z],
-                     [0, 0, 0, 1]],'d')
-d2r =  lambda deg: np.pi*deg/180
 
 
 if __name__ == "__main__":
@@ -963,255 +736,257 @@ if __name__ == "__main__":
 
   print "all test succeed."
 
-  if 0:
- #%%
-    Hm = [ rotateZ(d2r(10)).dot(translate(1,0,0)),
-           rotateX(d2r(30)).dot(translate(2,0,0))]
-    Hm_inv = [invT(h) for h in Hm]
+  np.random.seed(0)
+  dim_x = 3
+  a = np.ones(dim_x)
 
-    xi_true, eta_true = [],[]
-    for h in Hm:
-      xi_true.append( h[:3,3].copy() )
-      eta_true.append( Rot2ax(h[:3,:3]) )
+  num_l = 100
+  sigma = 0.02
+  s = np.full(dim_x, sigma**2)
 
-    S = len(Hm) + 1
-
-    def CalibrationConstraint(xi, eta, r0, t0, r1, t1):
-      R10 = ax2Rot(eta)
-      R1  = ax2Rot(r1)
-      e_t = xi - R1.dot(xi) + R10.dot(t0) - t1
-      e_r = R10.dot(r0) - r1
-      return np.r_[e_t, e_r]
-
-    ''' generate ground truth trajectories '''
-  #  np.random.seed(2)
-    T = 10
-    dM = []
-    for t in xrange(T):
-      dm = [rotateX(d2r(60+20*np.random.rand(1))).dot(
-            rotateY(d2r(60+20*np.random.rand(1))).dot(
-            rotateZ(d2r(60+20*np.random.rand(1))).dot(
-            translate(1,1,1))))]
-      for h, h_inv in zip(Hm, Hm_inv):
-        dm.append( h.dot(dm[0]).dot(h_inv) )
-      dM.append(dm)
-
-    Sigmas = [(1e-2*np.ones(3), 1e-2*np.ones(3)),
-              (1e-2*np.ones(3), 1e-2*np.ones(3)),
-              (1e-2*np.ones(3), 1e-2*np.ones(3))]
-    Weight = [ ( np.diag(1.0/sigma_pair[0]**2),
-                 np.diag(1.0/sigma_pair[1]**2) ) for sigma_pair in Sigmas ]
-    noise_on = 1
-    rs,ts = [], []
-    for s in range(S):
-      r,t = [],[]
-      for i in xrange(T):
-        r.append( np.copy( noise_on*Sigmas[s][0]*np.random.randn(3) + Rot2ax(dM[i][s][:3,:3]) ) )
-        t.append( np.copy( noise_on*Sigmas[s][1]*np.random.randn(3) + dM[i][s][:3,3] ) )
-      rs.append(r)
-      ts.append(t)
-
-    xi,eta = [],[]
-    xi[:] = xi_true[:]
-    eta[:] = eta_true[:]
+  bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
+  problem = GaussHelmertProblem()
+  for i in range(num_l):
+    problem.AddConstraintUsingAD(EqualityConstraint,
+                                 [ a ],
+                                 [ bs[i] ])
+    problem.SetSigma(bs[i], s)
   #%%
-    problem = GaussHelmertProblem()
-    for i in range(T):
-      for s in range(1, S):
-        problem.AddConstraintUsingAD(CalibrationConstraint,
-                                     [ xi[s-1], eta[s-1] ],
-                                     [ rs[0][i], ts[0][i], rs[s][i], ts[s][i] ])
-#    problem.SetParameterization(xi[0], SubsetParameterization([1,1,0]))
-        problem.SetParameterization(rs[0][i], SubsetParameterization([1,1,0]))
+  problem.UpdateLocalOffset()
+  dim_x = problem.NumReducedParameters()
+  dim_l = problem.NumReducedObservations()
+  dim_r = problem.NumResiduals()
+  offset =  np.cumsum([0, dim_x, dim_l, dim_r])
+  segment_x = slice(offset[0], offset[1])
+  segment_l = slice(offset[1], offset[2])
+  segment_r = slice(offset[2], offset[3])
+  r_offset = offset[2]
+  l_offset = offset[1]
+  dim_total = offset[-1]
 
-    dim_x = problem.NumParameters()
-    dim_l = problem.NumObservations()
-    dim_r = problem.NumResiduals()
-    slc_x = slice(0, dim_x)
-    slc_l = slice(dim_x, dim_x+dim_l)
-    slc_r = slice(dim_x+dim_l, dim_x + dim_l + dim_r)
+#  # preserve space for csc matrix, symmetric, lower part
+#  nnz = 0
+#  for cb in problem.constraint_blocks:
+#    nnz += cb.nnz
+#  nnz += dim_l
+#  data = np.empty(nnz)
+#  row  = np.empty(nnz)
+#  col  = np.empty(nnz)
+#
+#
+#  class Test():
+#    def __init__(self, h, w, h0, w0, dim_h, w_offset_list,  dim_w_list, flat):
+#      self.mat = [np.empty((dim_h, dim_w)) for dim_w in dim_w_list]
+#      self.tup = zip(*[tuple(mat) for mat in self.mat])
+#
+#      self.dst = []
+#      for row in range(h0, h0+dim_h):
+#        offset0 = w0 + row*w
+#        self.dst.append([ flat[offset0 + offset1: offset0 + offset1 + size ] for offset1,size in zip(w_offset_list, dim_w_list)  ] )
+#
+#    def Update(self, mat_list):
+#      for m, m_new in zip(self.mat, mat_list):
+#        m[:] = m_new
+#
+#      for i in range(3):
+#        for dst, org in zip(self.dst[i], self.tup[i]):
+#          dst[:] = org[:]
+#
+#
+#  h,w = 10,10
+#  dst_mat = np.zeros((h,w))
+#  h0,w0 = 3,3
+#
+#  dim_h   = 3
+#  dim_w_list = [1,2,3]
+#  w_offset_list = np.cumsum( np.array([0]+dim_w_list[:-1])+np.random.randint(0,2,len(dim_w_list))) #
+#
+#  def GenMat(dim_h, dim_w_list):
+#    return lambda : [np.random.rand(dim_h, dim_w) for dim_w in dim_w_list]
+#
+#  t = Test(h,w, h0,w0, dim_h, w_offset_list, dim_w_list, dst_mat.reshape(-1) )
+#  g = GenMat(dim_h, dim_w_list)
+#  m = g()
+#  t.Update(m)
+#  print dst_mat
 
-    x0 = problem.CollectParameters()
-    l0 = problem.CollectObservations()
-    x,l = x0.copy(),l0.copy()
-    e = l - l0
-
-  #%% cg
-    JA,JB = problem.EvaluateConstraintJacobian(x, l)
-    J = np.c_[JA, JB]
-    lambd = np.linalg.lstsq(J.T, b[:dim_x+dim_l])[0]
-    x,l,lambd = problem.SolveNewtonCG(x, l, e, trust_region=1e3)
-    e = l - l0
-    g = problem.EvaluateConstraintResidual(x,l)
-    print np.linalg.norm(g)
-  #%% trust region
-    def DoglegStepsForLeastSquares(A, b, nabla):
-      ''' solve p* = argmin ||Ap + b||^2, subject to ||p*||2 < nabla'''
-      g = A.T.dot(b) # gradient
-      hessian  = A.T.dot(A)
-      # shortest step: Steepest descend direction, negative gradient
-      p_1 = -g.dot(g)/g.dot(hessian.dot(g))*g
-      norm_p1 = np.linalg.norm(p_1)
-      if norm_p1 >= nabla:
-        return nabla*p_1/norm_p1
-
-      # longest step: Newton Step
-      p_2 = np.linalg.pinv(A).dot(-b) # A'A p = -A'b
-      norm_p2 = np.linalg.norm(p_2)
-      if norm_p2 <= nabla:
-        return p_2
-
-      # combined step
-      # solve || (1-a)*p1 + a * p2 || = nabla, s.t 1>a>0
-      norm_p1_squared = norm_p1**2
-      p1_dot_p2 = p_1.dot(p_2)
-      A = norm_p1_squared + norm_p2**2 - 2*p1_dot_p2
-      B = 2*(p1_dot_p2 - norm_p1_squared)
-      C = norm_p1_squared - nabla**2
-      a = np.roots([A,B,C]) # Ax^2+Bx+C = 0
-      a = a[a>0]
-      return (1-a)*p_1 + a*p_2
-
-    nabla = 1
-
-    JA,JB = problem.EvaluateConstraintJacobian(x, l)
-    J = np.c_[JA,JB]
-    g = problem.EvaluateConstraintResidual(x, l)
-    p = DoglegStepsForLeastSquares(J, g, 0.8*nabla)
-
-    Qj,Rj,Pj = scipy.linalg.qr(J.T, pivoting=True, mode='full')
-    Z = Qj[:, -(dim_x+dim_l-dim_r):]
-
-    g_new = problem.EvaluateConstraintResidual(x + p[:dim_x], l + p[dim_x:])
-    diff = g.dot(g)- g_new.dot(g_new)
-    Jp = J.dot(p)
-    pre = -Jp.T.dot(g+0.5*Jp)
-    rho = diff/pre
-    if rho < 0.25:
-      nabla /= 4
-    else:
-      if rho > 0.75 and np.linalg.norm(p) == nabla:
-        nabla = np.minimum(2*nabla, 2)
-    if rho > 0.1:
-      x += p[:dim_x]
-      l += p[dim_x:]
-    print rho, np.linalg.norm(g)
-    problem.EvaluateObjective(l-l0)
-    xf, le = problem.SolveGaussEliminateDense(x, l)
-    problem.EvaluateObjective(le)
-
-    xf, le = problem.SolveGaussEliminateDense(x0, l0)
-    problem.EvaluateObjective(le)
+#import functools
 
 
-  #%% cvxopt
+#@functools.total_ordering
+class LexicalSortable(object):
+  def key(self):
+    raise NotImplementedError()
 
-    A,B = problem.EvaluateConstraintJacobianSparse(x0, l0)
-    Qa,Ra,Pa = scipy.linalg.qr(A.A, pivoting=True, mode='full')
-    Z = Qa[:, dim_x:]
-    WBZ = W_s.dot(B.T).dot(Z)
-    ZBWBZ = WBZ.T.dot(WBZ)
-
-
+  def __lt__(self, other):
+    return self.key() < other.key()
 
 
-  #%%
-    alpha = 1
+class SubMatrix(LexicalSortable):
+  """ ordering of submatrix in a column-major sparse matrix """
+  def __init__(self, r, c, array_shape): #
+    self.r = r
+    self.c = c
+    self.dim_vec, self.num_vec = array_shape[:2]
+    self.vec = [SubVector(r, i, self.dim_vec) for i in range(self.num_vec)]
 
-    mu = 0.5
-    JA,JB = problem.EvaluateConstraintJacobian(x, l)
-    J = np.c_[JA,JB]
+  def key(self):
+    return (self.c, self.r)
 
-    g = problem.EvaluateConstraintResidual(x, l)
-    print np.linalg.norm(g)
-    e = l - l0
+  def Write(self, array):
+    if self.vec[0].data is None:
+      raise RuntimeError("slice not assigned yet")
 
-    BSBT = JB.dot(Sigma).dot(JB.T)
-    Qa,Ra,Pa = scipy.linalg.qr(JA, pivoting=True, mode='full')
-    Z = Qa[:, 8:]
-    np.linalg.eig(Z.T.dot(BSBT).dot(Z))
+    for dst, src in zip(self.vec, array.T):
+      dst.data[:] = src
 
+  def _feed_grid_matrix(self, which):
+    data = np.mgrid[self.r : self.r + self.dim_vec, self.c : self.c + self.num_vec][which]
+    self.Write(data)
 
-    W_mu = np.diag( 1 / ( W.diagonal() + mu ) ) #
-    WSE = W_mu.dot(W.dot(e))
+  @property
+  def data(self):
+    if self.vec[0].data is None:
+      return None     #      raise RuntimeError("slice not assigned yet")
+    buf = np.empty((self.dim_vec, self.num_vec), order='F').T
+    for src, dst in zip(self.vec, buf):
+      dst[:] = src.data[:]
+    return buf.T
 
-    M = JA.dot(JA.T)/mu + JB.dot(W_mu).dot(JB.T)
-    c = g - JB.dot(WSE)
-    lambd = scipy.linalg.cho_solve(scipy.linalg.cho_factor(M), c)
-    dl  = -WSE - W_mu.dot(JB.T.dot(lambd))
-    dx  = -JA.T.dot(lambd)/mu
+  def __str__(self):
+    return "Block at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
+  __repr__ = __str__
 
-    g_new_predict = g + JA.dot(dx) + JB.dot(dl)
-    g_new_actual  = problem.EvaluateConstraintResidual(x + dx, l + dl)
-    print np.linalg.norm(g_new_actual), np.linalg.norm(g_new_predict)
+class SubVector(LexicalSortable):
+  def __init__(self, r, seg, length):
+    self.r = r
+    self.seg = seg
+    self.length = length
+    self.data = None
 
-    grad = W.dot(e).dot(dl)
+  def key(self):
+    return (self.seg, self.r)
 
-    alpha = np.maximum(alpha, 0.5*grad/np.linalg.norm(g))
-    phi_new = problem.EvaluateMeritFunction(x + dx, l + dl, alpha)
+  def __str__(self):
+    return "vec at %d row,  %d th seg of array " % (self.r, self.seg) + str(self.data)
+  __repr__ = __str__
 
-    x += dx
-    l += dl
+from heapq import *
+from numpy.random import *
+from copy import deepcopy
 
-
-    '''  '''
-    JA,JB = problem.EvaluateConstraintJacobian(x, l)
-    J = np.c_[JA,JB]
-
-    b_lsq = np.zeros( ( dim_x + dim_l) )
-    b_lsq[slc_l] = -W.dot(e)
-    lambd_lsq = scipy.linalg.lstsq(J.T, b_lsq)[0] # J'*lambda = -grad f
-    res_lsq = b_lsq + J.T.dot(lambd_lsq)
-
-    A = np.zeros( (dim_l + dim_r, dim_x + dim_l) )
-    A[:dim_l, slc_l] = W
-    A[dim_l:, :] = J
-
-    b = np.zeros( ( dim_l + dim_r ) )
-    b[:dim_l] = res_lsq[dim_x:]
-    b[dim_l:] = problem.EvaluateConstraintResidual(x, l)
-
-    p = scipy.linalg.lstsq(A, -b)[0]
-    g_new = problem.EvaluateConstraintResidual(x + p[:dim_x], l + p[dim_x:])
-    diff = g.dot(g)- g_new.dot(g_new)
-    print diff
-    x += p[:dim_x]
-    l += p[dim_x:]
-    e = l - l0
-    print problem.EvaluateObjective(e)
-    subproblem = CGSteihaugSubproblem(p, lambda p: 0, lambda p:b, lambda p:A)
-    p, hits_boundary = subproblem.solve(10)
+def Rnd_c():
+  list_size = randint(1, 4)
+  list_offset = randint(0, 10)
+  list_ = np.arange(list_size) + list_offset
+  return list_.tolist()
 
 
-    Qj,Rj,Pj = scipy.linalg.qr(J.T, pivoting=True, mode='full')
-    Z = Qj[:, -(dim_x+dim_l-dim_r):]
-    G = scipy.linalg.block_diag(np.zeros([dim_x]*2), W)
-    H = Z.T.dot(G).dot(Z)
-    jac = np.zeros( ( dim_x + dim_l + dim_r ) )
-    jac[slc_l] = W.dot(e)
-    jac[slc_r] = problem.EvaluateConstraintResidual(x, l)
+def SortBlocks(blocks_list):
+  # 1. sort each row
+  list_dict = {}
+  for blocks in blocks_list:
+    if len(blocks)>1:
+      blocks.sort(reverse=True) # big -> small, so pop will happen at the tail
+    list_dict[blocks[0].r] = blocks
 
-    hess = np.zeros( jac.shape*2 )
-    hess[slc_x, slc_r] = JA.T
-    hess[slc_l, slc_r] = JB.T
-    hess[slc_l, slc_l] = W
-    hess[slc_r, slc_x] = JA
-    hess[slc_r, slc_l] = JB
+  ret = []
+  front = [ row.pop() for row in list_dict.values() ] # collect smallest element of each row
+  heapify(front)  # heap[0] is the smallest item, and heap.sort() maintains the heap invariant
 
-    p = np.zeros_like(jac)
+  while front: # not empty
+    target = heappop(front) # Pop and return the smallest item from the heap
+    current_row, current_col = target.r, target.c
 
-    subproblem = CGSteihaugSubproblem(p, lambda p: 0, lambda p:jac, lambda p:hess)
-    p, hits_boundary = subproblem.solve(10)
+    if ret and ret[-1].c != current_col:
+      """column changed"""
+      print current_col
+    ret.append(target)
 
-    """"""
-    x = x0.copy()
-    l = l0.copy()
+    """ Act like an automatic vending machine that keep supplying the heap with
+        the smallest item from each row.  """
+    current_list = list_dict[current_row]
+    if current_list: # is not empty, take one elment from the target-row as replacement
+      heappush(front, current_list.pop())
+    # else, no replacement, (meaning this row is finished), just pop
+  return ret
 
 
-  #  result = problem.Solve()
+def CreateSparseMatrix(blocks_list):
+  """ 1. sort the block to a column-major flat list """
+  sorted_block = sorted(blocks_list)
+  num_block = len(sorted_block)
+
+  """ 2. gather the blocks of the same column in a group, collect
+      their sub vectors and sort them again into column major """
+  vectors = []
+  heap = []
+  for i in range( num_block ):
+    current = sorted_block[i]
+    heap.extend(current.vec)
+
+    # reached the last block of this column or the end
+    if i == num_block-1 or sorted_block[i+1].c != current.c:
+      # process this group
+      vectors.extend( sorted(heap) )
+      # reset the heap and start the new
+      heap = []
+
+  """ 3. assign vector segments to slices """
+  len_list = [vec.length for vec in vectors]
+  offset = np.cumsum( [0] + len_list ).tolist()
+  nnz = offset[-1]
+  data = np.empty(nnz)
+  for start, vec in zip(offset, vectors):
+    vec.data = data[start : start + vec.length]
+
+  """ 4. Make row and col indices for COO matrix.
+      Since the mapping is done, we could use it to assemble the indices """
+  for block in sorted_block:
+    block._feed_grid_matrix(0)
+  row = data.copy()
+
+  for block in sorted_block:
+    block._feed_grid_matrix(1)
+  col = data.copy()
+  # for coo, use scipy.sparse.coo_matrix((data, (row, col)))
+
+  """ 5. convert to Compressed Sparse Column (CSC)
+  * compressed(col) -> indices, where only the heads of each col are recorded
+  """
+  if 1:  # fast version
+    indptr, = np.where( np.diff(col) )  # np.diff : out[n] = a[n+1]-a[n]
+    indptr = np.r_[0, indptr+1, nnz]
+  else:  # slow version
+    indptr = np.array([0] + [ i for i in xrange(1, nnz) if col[i] != col[i-1] ] + [nnz])
+
+#  return scipy.sparse.coo_matrix( (data, (row, col) ) )
+  return scipy.sparse.csc_matrix( (data, row, indptr ) )
+
+def test_CreateSparseMatrix():
+  dense  = np.empty((4,3))
+  sparse = CreateSparseMatrix( [ SubMatrix(0, 0, (4,3)) ] )
+  assert sparse.shape == dense.shape
+
+  # write function
+  dense  = np.arange(12).reshape(4,3)
+  blocks_list = [ SubMatrix(0, 0, (4,3)) ]
+  sparse = CreateSparseMatrix( blocks_list  )
+  blocks_list[0].Write(dense)
+  assert_array_equal( sparse.A, dense  )
+
+  # multiple matrix
+  e = [np.ones(1), 2*np.eye(2), 3*np.eye(3)]
+  dense  = scipy.linalg.block_diag(*e)
+  blocks_list = [ SubMatrix(0, 0, (1,1)), SubMatrix(1, 1, (2,2)), SubMatrix(3, 3, (3,3)) ]
+  sparse = CreateSparseMatrix( blocks_list  )
+  for i in range(3):
+    blocks_list[i].Write(e[i])
+  assert_array_equal( sparse.A, dense  )
+
+test_CreateSparseMatrix()
 
 
-    scipy.sparse.linalg.cg
 
 
 
