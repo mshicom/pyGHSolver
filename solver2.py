@@ -28,7 +28,8 @@ class LexicalSortable(object):
 
 class ColumnMajorSparseMatrix():
 
-  def __init__(self):
+  def __init__(self, shape=None):
+    self.shape = shape
     self.submatrix_list = []
     self.data = None
     self.row  = None
@@ -75,11 +76,18 @@ class ColumnMajorSparseMatrix():
         Since the mapping is done, we could use it to collect indivial indice """
     for vec in vectors:
       vec._feed_row_indice()
-    row = data.copy()
+    row = data.astype('i').copy()
 
     for vec in vectors:
       vec._feed_col_indice()
-    col = data.copy()
+    col = data.astype('i').copy()
+
+    """ update shape info"""
+    shape = (row.max()+1, col[-1]+1)
+    if self.shape is None:
+      self.shape = shape
+    else:
+      self.shape = tuple(np.max([shape, self.shape], axis=0))
 
     """ 5. convert to Compressed Sparse Column (CSC)
     * compressed(col) -> indices, where only the heads of each col are recorded
@@ -93,14 +101,17 @@ class ColumnMajorSparseMatrix():
     self.data, self.col, self.row, self.indptr = data, col, row, indptr
 
     if coo:
-      return scipy.sparse.csc_matrix( (data, row, indptr ) )
+      return scipy.sparse.csc_matrix( (data, row, indptr), shape=self.shape)
     else:
-      return scipy.sparse.coo_matrix( (data, (row, col) ) )
+      return scipy.sparse.coo_matrix( (data, (row, col) ), shape=self.shape)
 
   def Shift(self, delta_r, delta_c):
     for submat in self.submatrix_list:
       submat.r += delta_r
       submat.c += delta_c
+
+  def Merge(self, other):
+    pass
 
   class SubMatrix(LexicalSortable):
     """ ordering of submatrix in a column-major sparse matrix """
@@ -152,7 +163,7 @@ class ColumnMajorSparseMatrix():
         self.data[:] = np.arange(r0,r1)
 
       def _feed_col_indice(self):
-        self.data[:] = self.parent.c + self.seq
+        self.data[:] = self.parent.c + self.seq # all the data share the same column
 
       def __str__(self):
         return "vec at %d row,  %dth segment of array " % (self.parent.r, self.seq) + str(self.data)
