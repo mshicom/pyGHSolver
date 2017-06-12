@@ -18,6 +18,7 @@ from parameterization import *
 import pycppad
 from pykrylov.linop import *
 
+#%% ColumnMajorSparseMatrix
 class LexicalSortable(object):
   def key(self):
     raise NotImplementedError()
@@ -155,9 +156,6 @@ class ColumnMajorSparseMatrix():
         return "vec at %d row,  %dth segment of array " % (self.parent.r, self.seq) + str(self.data)
       __repr__ = __str__
 
-
-
-
 def test_CreateSparseMatrix():
   dense  = np.empty((4,3))
 
@@ -189,28 +187,7 @@ def test_CreateSparseMatrix():
   assert_array_equal( sparse.A, dense  )
 
   print "test_CreateSparseMatrix passed"
-
-def GenerateJacobianFunction(g, x_list, l_list):
-  x_sizes = [x.size for x in x_list]
-  l_sizes = [l.size for l in l_list]
-  xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
-  x_indices = np.cumsum([0]+x_sizes)
-  l_indices = np.cumsum([0]+l_sizes)
-
-  var       = np.hstack(x_list+l_list )
-  var_ad    = pycppad.independent( var )
-  var_jacobian= pycppad.adfun(var_ad, g( *np.split(var_ad, xl_indices) ) ).jacobian
-
-  x_slc = [slice(start, stop) for start, stop in zip(x_indices[:-1], x_indices[1:])]
-  l_slc = [slice(start, stop) for start, stop in zip(l_indices[:-1], l_indices[1:])]
-  def g_jacobian(x,l):
-    var = np.hstack([x[slc] for slc in x_slc ] + [l[slc] for slc in l_slc ] )
-    J = var_jacobian(var)
-    return np.split(J, xl_indices, axis=1)
-  return g_jacobian
-
-
-
+#%% CompoundVector
 class ArrayID(object):
   __slots__ = 'addr','data'
   def __init__(self, array):
@@ -225,121 +202,117 @@ class ArrayID(object):
   def __eq__(self, other):
     return self.data.shape == other.data.shape and self.addr == other.addr
 
-class VariableBlock(ArrayID):
-  __slots__ = 'place','place_local','param'
-  def __init__(self, array):
-    super(VariableBlock, self).__init__(array)
-    self.param = IdentityParameterization(array.shape[0])
-
-  def SetPlace(self, offset):
-    size = self.data.shape[0] #self.param.LocalSize()
-    self.place = slice(offset, offset + size)
-    return size
-
-  def SetLocalPlace(self, offset):
-    size = self.param.LocalSize()
-    self.place_local = slice(offset, offset + size)
-    return size
-
-class ObservationBlock(VariableBlock):
-  __slots__ = '_sigma','weight'
-  def __init__(self, array):
-    VariableBlock.__init__(self, array)
-    self._sigma = self.weight = np.ones(array.shape[0])
-
-  @property
-  def sigma(self):
-    return self._sigma
-
-  @sigma.setter
-  def sigma(self, sigma):
-    self._sigma = sigma
-    self.weight = 1./sigma
-
-  def ComputeCTWCInvAndE(self, le):
-    C = self.param.ComputeJacobian(le)
-    CTW = C.T * self.weight       #  = C.T.dot( np.diag(self.weight) )
-    CTWC_inv = np.linalg.inv(CTW.dot(C))
-    e = CTWC_inv.dot( CTW.dot(le) )
-    return CTWC_inv, e
-
-  def ComputeCTWCAndCTWE(self, le):
-    C = self.param.ComputeJacobian(le)
-    CTW = C.T * self.weight       #  = C.T.dot( np.diag(self.weight) )
-    CTWC = CTW.dot(C)
-    CTWe = CTW.dot(le)
-    return CTWC, CTWe
-
-def test_VariableBlock():
+def test_ArrayID():
   a = np.empty((10,10))
   b = np.arange(3)
-  assert len( { VariableBlock(a[0  ]), VariableBlock(b) } ) == 2             # different variable
-  assert len( { VariableBlock(a[0  ]), VariableBlock(a[   1]) } ) == 2       # same length, different row
-  assert len( { VariableBlock(a[0, :5]), VariableBlock(a[0,  :4]) } ) == 2   # diff length, same head
-  assert len( { VariableBlock(a[0, :5]), VariableBlock(a[0, 1:5]) } ) == 2   # diff length, same end
+  assert len( { ArrayID(a[0  ]), ArrayID(b) } ) == 2             # different variable
+  assert len( { ArrayID(a[0  ]), ArrayID(a[   1]) } ) == 2       # same length, different row
+  assert len( { ArrayID(a[0, :5]), ArrayID(a[0,  :4]) } ) == 2   # diff length, same head
+  assert len( { ArrayID(a[0, :5]), ArrayID(a[0, 1:5]) } ) == 2   # diff length, same end
   s = np.empty(1)
-  assert len( { VariableBlock(s), VariableBlock(s) } ) == 1       # scalar
+  assert len( { ArrayID(s), ArrayID(s) } ) == 1       # scalar
+  print "test_ArrayID passed"
 
-ConstraintBlock = namedtuple('ConstraintBlock',
-                             ['g_flat', 'g_jacobian', 'r_slc', 'x_var', 'l_var','submat_id'])
+class CompoundVector(object):
+  def __init__(self, capacity=10000):
+    self.buff = np.empty(capacity)
+    self.tail = 0
 
+  def MakeVector(self, dim):
+    """ Make new segment on the tail """
+    head = self.tail
+    seg = np.ndarray(shape  = (dim,),
+                     buffer = self.buff,
+                     offset = head*8 )  # 8 for double size
+    self.tail += dim
+    return head, seg
+
+  @property
+  def flat(self):
+    return np.ndarray((self.tail,), buffer=self.buff)
+
+class CompoundVectorWithDict(CompoundVector):
+  def __init__(self, cap = 10000):
+    self.vec_dict = {}
+    super(CompoundVectorWithDict, self).__init__(cap)
+
+  def AddVector(self, vector_list):
+    ret = []
+    for v in vector_list:
+      """ 1. check whether it is a newcomer, use address as hash"""
+      key = ArrayID(v)
+      if key not in self.vec_dict:
+        """ 2. Make new segment on the tail """
+        new_item = self.MakeVector(len(v))
+        new_item[1][:] = v      # copy inital value
+        self.vec_dict[key] = new_item
+        ret.append( new_item )
+      else:
+        ret.append( self.vec_dict[key] )
+    offset, seg = zip(*ret)
+    return offset, seg
+
+  def OverWriteOrigin(self):
+    for dst, (_, src) in self.vec_dict.iteritems():
+      dst.data[:] = src
+
+  @property
+  def flat(self):
+    return np.ndarray((self.tail,), buffer=self.buff)
+
+def test_CompoundVector():
+  vs = np.random.rand(4,4)
+  # main function
+  cv = CompoundVectorWithDict()
+  offset, seg = cv.AddVector(v for v in vs)
+  assert_array_equal(cv.flat, vs.ravel())
+  assert_equal(offset, [0,4,8,12])
+
+  # write, from flat to segment
+  cv.flat[:] = 1
+  for s in seg:
+    assert_equal(s, np.ones(4))
+
+  # write, from segment to flat
+  seg[0][:] = 0
+  assert_equal( cv.flat, np.hstack( [np.zeros(4), np.ones(4*3) ] ) )
+
+  # write, from flat to origin segment
+  cv.OverWriteOrigin()
+  assert_equal( vs.ravel(), np.hstack( [np.zeros(4), np.ones(4*3) ]) )
+
+  # add duplcate vector
+  offset2, _ = cv.AddVector(v for v in vs)
+  assert_equal(offset, offset2)
+  offset3, _ = cv.AddVector( [ np.empty(1) ] )
+  assert offset3[0] == 16
+  print "test_CompoundVector passed"
+
+
+#%% GaussHelmertProblem
+
+
+ConstraintBlock = namedtuple('ConstraintBlock', ['id', 'g_res', 'g_jac'])
 class GaussHelmertProblem:
+
   def __init__(self):
-    # map from x (nparray.data) to x_id (int)
-    self.parameter_offset = 0
-    self.parameter_local_offset = -1
-
-    self.parameter_dict = {}
-
-    # map from l (nparray.base) to l_id (int)
-    self.observation_offset = 0
-    self.observation_local_offset = -1
-
-    self.observation_dict = {}
-    self.observation_weight = {}
-
-    self.constraint_offset = 0
-    self.constraint_blocks = []    # list of ConstraintBlock
-    self.variance_factor = -1.0
+    self.cv_x   = CompoundVectorWithDict()
+    self.cv_l   = CompoundVectorWithDict()
+    self.cv_res = CompoundVector()
 
     self.csm_x = ColumnMajorSparseMatrix()
     self.csm_l = ColumnMajorSparseMatrix()
+    self.Jx, self.Jl = None,None
 
-  def AddParameter(self, parameter_list):
-    """ Add x (nparray.base) to parameter_dict and return a list of x_id
-    """
-    x_var = []
-    for x in parameter_list:
-      var = VariableBlock(x)
-      if var not in self.parameter_dict:
-        self.parameter_offset += var.SetPlace(self.parameter_offset)
-        self.parameter_dict[var] = var
-        x_var.append( var )
-      else:
-        x_var.append(self.parameter_dict[var])
-    return x_var
-
-  def AddObservation(self, observation_list):
-    """ Add l (nparray.base) to observation_dict and return a list of l_id  """
-    l_var = []
-    for l in observation_list:
-      var = ObservationBlock(l)
-      if var not in self.observation_dict:
-        self.observation_offset += var.SetPlace(self.observation_offset)
-        self.observation_dict[var] = var
-        l_var.append( var )
-      else:
-        l_var.append(self.observation_dict[var])
-    return l_var
+    self.constraint_blocks = []    # list of ConstraintBlock
+    self.variance_factor = -1.0
 
   def AddConstraintUsingAD(self, g, x_list, l_list):
-    """
-      1.add x (and l) to parameter_dict (and observation_dict)
-      2.add record tuple(g, x_ids, l_ids) in constraint_blocks
-    """
     x_sizes = [x.size for x in x_list]
     l_sizes = [l.size for l in l_list]
     xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
+
+    """ 1. Generate Jacobian function by cppad """
     var       = np.hstack(x_list+l_list )
     var_ad    = pycppad.independent( var )
     var_jacobian= pycppad.adfun(var_ad, g( *np.split(var_ad, xl_indices) ) ).jacobian
@@ -349,430 +322,73 @@ class GaussHelmertProblem:
     if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
       RuntimeWarning("AutoDiff Not valid")
       return
-
-    x_var = self.AddParameter(x_list)
-    l_var = self.AddObservation(l_list)
-    x_slc = [v.place for v in x_var]
-    l_slc = [v.place for v in l_var]
-    def g_flat(x,l):
-      return g( *([x[slc] for slc in x_slc ] + [l[slc] for slc in l_slc ] ) )
-
-    def g_jacobian(x,l):
-      var = np.hstack([x[slc] for slc in x_slc ] + [l[slc] for slc in l_slc ] )
-      J = var_jacobian(var)
-      return np.split(J, xl_indices, axis=1)
     dim_res = len(res)
-    r_slc = slice(self.constraint_offset, self.constraint_offset+dim_res )
-    self.constraint_offset = r_slc.stop
 
-    submat_x_id = [ self.csm_x.AddDenseSubMatrix(r_slc.start,
-                                                 var_.place.start,
-                                                 (dim_res, var_.data.shape[0]))
-                                                   for var_ in x_var ]
-    submat_l_id = [ self.csm_l.AddDenseSubMatrix(r_slc.start,
-                                                 var_.place.start,
-                                                 (dim_res, var_.data.shape[0]))
-                                                   for var_ in l_var ]
-    self.constraint_blocks.append(
-      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var, [submat_x_id, submat_l_id]))
+    """ 2. Assign poses and mapped vectors for input parameter/observation arrays"""
+    x_off, x_vec = self.cv_x.AddVector(x_list)
+    l_off, l_vec = self.cv_l.AddVector(l_list)
+    xl_vec = x_vec + l_vec
+    """ 3. Compound vector for constraint residual """
+    res_off, res_vec = self.cv_res.MakeVector(dim_res)
 
-  def AddConstraintUsingMD(self, g, g_jac, x_list, l_list):
-    """
-      1.add x (and l) to parameter_dict (and observation_dict)
-      2.add record tuple(g, x_ids, l_ids) in constraint_blocks
-    """
-    x_sizes = [x.size for x in x_list]
-    l_sizes = [l.size for l in l_list]
+    jac_submat_id_x = [ self.csm_x.AddDenseSubMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
+    jac_submat_id_l = [ self.csm_l.AddDenseSubMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
 
-    res = g( *(x_list + l_list) )
-    jac = g_jac( *(x_list + l_list) )
+    """ 4. Generate constraint functor that use the mapped vectors """
+    def g_res():
+      res_vec[:] = g(*xl_vec)
 
-    inequal_size = [j.shape != (len(res), size) for j, size in zip(jac, x_sizes+l_sizes)]
-    if len(jac) != len(x_list + l_list) or np.any( inequal_size ):
-      RuntimeError("Jacobian Size Not fit")
-      return
-    if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
-      RuntimeWarning("Function Not valid")
-      return
+    def g_jac():
+      J = var_jacobian( np.hstack(xl_vec) )
+      jac = np.split(J, xl_indices, axis=1)
+      jac.reverse() # reversed, to pop(-1) instead of pop(0)
+      for submat_id in jac_submat_id_x:
+        self.csm_x.SubMatrixWrite( submat_id, jac.pop() )
 
-    x_var = self.AddParameter(x_list)
-    l_var = self.AddObservation(l_list)
-    x_slc = [v.place for v in x_var]
-    l_slc = [v.place for v in l_var]
-    def g_flat(x,l):
-      return g( *([x[slc] for slc in x_slc ] + [l[slc] for slc in l_slc ] ) )
+      for submat_id in jac_submat_id_l:
+        self.csm_l.SubMatrixWrite( submat_id, jac.pop() )
 
-    def g_jacobian(x,l):
-      return g_jac( *([x[slc] for slc in x_slc ] + [l[slc] for slc in l_slc ] ) )
-
-    r_slc = slice(self.constraint_offset, self.constraint_offset+len(res) )
-    self.constraint_offset = r_slc.stop
-    nnz = len(res)*sum(x_sizes+l_sizes)
-
-    self.constraint_blocks.append(
-      ConstraintBlock( g_flat, g_jacobian, r_slc, x_var, l_var,nnz ))
-
-  def UpdateLocalOffset(self):
-    self.parameter_local_offset  = 0
-    for var in self.parameter_dict.itervalues():
-      self.parameter_local_offset += var.SetLocalPlace(self.parameter_local_offset)
-
-    self.observation_local_offset = 0
-    for var in self.observation_dict.itervalues():
-      self.observation_local_offset += var.SetLocalPlace(self.observation_local_offset)
-
-  def SetParameterization(self, array, parameterization):
-    var = VariableBlock(array)
-    if var in self.parameter_dict:
-      self.parameter_dict[var].param = parameterization
-    elif var in self.observation_dict:
-      self.observation_dict[var].param = parameterization
-    else:
-      raise RuntimeWarning("Input variable not in the lists")
-
-  def SetSigma(self, array, sigma):
-    if not isinstance(array, list):
-      array = [array]
-    if not isinstance(sigma, list):
-      sigma = [sigma]*len(array)
-    elif len(sigma) != array:
-      raise ValueError("number don't match")
-
-    for ar, si in zip(array, sigma):
-      var = ObservationBlock(ar)
-      if var in self.observation_dict:
-        self.observation_dict[var].sigma = si
-      else:
-        raise RuntimeWarning("Input variable not in the lists")
-
-  def NumParameters(self):
-    return self.parameter_offset
-
-  def NumReducedParameters(self):
-    return self.parameter_local_offset
-
-  def NumObservations(self):
-    return self.observation_offset
-
-  def NumReducedObservations(self):
-    return self.observation_local_offset
-
-  def NumResiduals(self):
-    return self.constraint_offset
-
-  def CollectParameters(self):
-    x = np.zeros(self.parameter_offset)
-    for var in self.parameter_dict.itervalues():
-      x[ var.place ] = var.data[:]
-    return x
-
-  def CollectObservations(self):
-    l = np.zeros( self.observation_offset )
-    for var in self.observation_dict.itervalues():
-      l[ var.place ] = var.data[:]
-    return l
-
-  def CollectSigma(self):
-    s = np.ones( self.observation_offset )
-    for var in self.observation_dict.itervalues():
-      if not var.sigma is None:
-        s[ var.place ] = var.sigma
-    return s
-
-  def Plus_x(self, x, delta):
-    for var in self.parameter_dict.itervalues():
-      x[var.place] = var.param.Plus( x[var.place], delta[ var.place_local ] )
-    return x
-
-  def Plus_l(self, l, delta):
-    for var in self.observation_dict.itervalues():
-      l[var.place] = var.param.Plus( l[var.place], delta[ var.place_local ] )
-    return l
-
-  def SetObservationFromVector(self, new_l):
-    for var in self.observation_dict.itervalues():
-      var.data[:] = new_l[ var.place ]
-
-  def SetParameterFromVector(self, new_x):
-    for var in self.parameter_dict.itervalues():
-      var.data[:] = new_x[ var.place ]
+    self.constraint_blocks.append(ConstraintBlock(res_off, g_res, g_jac))
 
 
+  def CompoundParameters(self):
+    return self.cv_x.flat
 
-  def EvaluateConstraintJacobian(self, x=None, l=None):
-    if x is None:
-      x = self.CollectParameters()
-    if l is None:
-      l = self.CollectObservations()
+  def CompoundObservation(self):
+    return self.cv_l.flat
 
-    A = np.zeros( ( self.NumResiduals(), self.NumParameters() ) )
-    B = np.zeros( ( self.NumResiduals(), self.NumObservations() ) )
+  def CompoundResidual(self):
+    return self.cv_res.flat
+
+  def MakeJacobians(self):
+    self.Jx = self.csm_x.BuildSparseMatrix()
+    self.Jl = self.csm_l.BuildSparseMatrix()
+    return self.Jx, self.Jl
+
+  def EvaluateResidual(self, ouput=False):
     for cb in self.constraint_blocks:
-      r_slc = cb.r_slc
-      js = cb.g_jacobian(x, l)
-      for var in cb.x_var:
-        A[r_slc, var.place] = js.pop(0)
-      for var in cb.l_var:
-        B[r_slc, var.place] = js.pop(0)
-    return A,B
+      cb.g_res()
 
-  def EvaluateAndUpdateConstraintJacobiantest(self, x=None, l=None):
-    if x is None:
-      x = self.CollectParameters()
-    if l is None:
-      l = self.CollectObservations()
+    if ouput:
+      return self.cv_res.flat
 
-    Jx = self.csm_x.BuildSparseMatrix()
-    Jl = self.csm_l.BuildSparseMatrix()
-
+  def EvaluateJacobian(self, ouput=False):
     for cb in self.constraint_blocks:
-      js = cb.g_jacobian(x, l)
-      for submat_id in cb.submat_id[0]:
-        self.csm_x.SubMatrixWrite( submat_id, js.pop(0) )
+      cb.g_jac()
 
-      for submat_id in cb.submat_id[1]:
-        self.csm_l.SubMatrixWrite( submat_id, js.pop(0) )
-    return Jx,Jl
+    if ouput:
+      return self.Jx, self.Jl
 
-  def EvaluateConstraintJacobianWithParam(self, x=None, l=None):
-    if x is None:
-      x = self.CollectParameters()
-    if l is None:
-      l = self.CollectObservations()
 
-    A = np.zeros( ( self.NumResiduals(), self.NumReducedParameters() ) )
-    B = np.zeros( ( self.NumResiduals(), self.NumReducedObservations() ) )
-    for cb in self.constraint_blocks:
-      r_slc = cb.r_slc
-      js = cb.g_jacobian(x, l)
-      for var in cb.x_var:
-        A[r_slc, var.place_local] = var.param.ToLocalJacobian( js.pop(0) )
-      for var in cb.l_var:
-        B[r_slc, var.place_local] = var.param.ToLocalJacobian( js.pop(0) )
-    return A,B
 
-  def EvaluateConstraintJacobianSparse(self, x=None, l=None):
-    if x is None:
-      x = self.CollectParameters()
-    if l is None:
-      l = self.CollectObservations()
 
-    A = scipy.sparse.lil_matrix( ( self.NumResiduals(), self.NumParameters(), ) )
-    B = scipy.sparse.lil_matrix( ( self.NumResiduals(), self.NumObservations(), ) )
-    for cb in self.constraint_blocks:
-      r_slc = cb.r_slc
-      js = cb.g_jacobian(x, l)
-      for x_slc in cb.x_slc:
-        A[r_slc, x_slc] = js.pop(0)
-      for l_slc in cb.l_slc:
-        B[r_slc, l_slc] = js.pop(0)
-    return A.tocsr(), B.tocsr()
-#    return A, B
-
-  def EvaluateConstraintResidual(self, x=None, l=None):
-    if x is None:
-      x = self.CollectParameters()
-    if l is None:
-      l = self.CollectObservations()
-    res = np.zeros(self.NumResiduals())
-    for cb in self.constraint_blocks:
-      res[cb.r_slc] = cb.g_flat(x, l)
-    return res
-
-  def EvaluateCorrectionJacobian(self, le):
-    CTWC_inv = np.zeros( (self.NumReducedObservations(), self.NumReducedObservations()) )
-    CTWC_inv_CTWe = np.empty(self.NumReducedObservations())
-
-    for var in self.observation_dict.itervalues():
-      place, place_local = var.place, var.place_local
-      CTWC_inv[place_local, place_local],  CTWC_inv_CTWe[place_local] = var.ComputeCTWCInvAndE(le[ place ])
-    return CTWC_inv, CTWC_inv_CTWe
-
-  def EvaluateCorrectionJacobianRawSparse(self, le):
-    CTWC = scipy.sparse.lil_matrix( (self.NumReducedObservations(), self.NumReducedObservations()) )
-    CTWe = np.empty(self.NumReducedObservations())
-
-    for var in self.observation_dict.itervalues():
-      place, place_local = var.place, var.place_local
-      CTWC[place_local, place_local],  CTWe[place_local] = var.ComputeCTWCAndCTWE(le[ place ])
-    return CTWC.todia(), CTWe
-
-  def EvaluateObjective(self, correction, weight=None):
-    if weight is None:
-      weight = 1.0 / self.CollectSigma()
-    return np.sum( weight * correction**2  )
-
-  def SolveGaussEliminateDense(self, x_init=None, l_init=None, max_it=30, Tx=1e-5):
-    s = self.CollectSigma()
-    s_inv = 1.0 / s
-    Sigma =  np.diag(s) #scipy.sparse.diags( s, offsets=0, format="coo" )
-
-    l0  = self.CollectObservations()
-    x   = self.CollectParameters()  if x_init is None else x_init.copy()
-    l   = l0.copy()                 if l_init is None else l_init.copy()
-    for it in range(max_it):
-        le    = l - l0
-        self.variance_factor = self.EvaluateObjective(le, s_inv)
-        print it, self.variance_factor
-
-        A, B = self.EvaluateConstraintJacobian(x, l)
-        err  = self.EvaluateConstraintResidual(x, l)
-        W    = np.linalg.inv( B.dot(Sigma).dot(B.T) )
-        Cg   = B.dot(le) - err
-        ATW  = A.T.dot(W)
-        ATWA = ATW.dot(A)
-        dx   = np.linalg.solve(ATWA,  ATW.dot(Cg))
-        lag  = W.dot( A.dot(dx) - Cg )
-        dl   = -Sigma.dot( B.T.dot(lag) ) - le
-        x    += dx
-        l    += dl
-        if np.abs( dx*np.sqrt( np.diag(ATWA) ) ).max() < Tx:
-          break
-    return x, l - l0
-
-  def SolveGaussEliminateDenseWithParam(self, x_init=None, l_init=None, max_it=30, Tx=1e-5):
-    self.UpdateLocalOffset()
-    s = self.CollectSigma()
-    s_inv = 1.0 / s
-    l0  = self.CollectObservations()
-    x   = self.CollectParameters()  if x_init is None else x_init.copy()
-    l   = l0.copy()                 if l_init is None else l_init.copy()
-    for it in range(max_it):
-        le    = l - l0
-        self.variance_factor = self.EvaluateObjective(le, s_inv)
-        print it, self.variance_factor
-
-        A, B = self.EvaluateConstraintJacobianWithParam(x, l)
-        CTWC_inv, CTWC_inv_CTWe = self.EvaluateCorrectionJacobian(le)
-        g  = self.EvaluateConstraintResidual(x, l)
-        Cg   =  B.dot(CTWC_inv_CTWe) - g
-
-        W    = np.linalg.inv( B.dot(CTWC_inv).dot(B.T) )
-        ATW  = A.T.dot(W)
-        ATWA = ATW.dot(A)
-        dx   = np.linalg.solve(ATWA,  ATW.dot(Cg))
-        lag  = W.dot( A.dot(dx) - Cg )
-        dl   = -( CTWC_inv.dot( B.T.dot(lag) ) + CTWC_inv_CTWe )
-        x    = self.Plus_x(x, dx)
-        l    = self.Plus_l(l, dl)
-        if np.abs( dx*np.sqrt( np.diag(ATWA) ) ).max() < Tx:
-          break
-    return x, l - l0
-
-  def SolveFullMatrixDense(self, x=None, l=None, maxit=10):
-    dim_x = self.NumParameters()
-    dim_l = self.NumObservations()
-    dim_r = self.NumResiduals()
-    offset =  np.cumsum([0, dim_x, dim_l, dim_r])
-    segment_x = slice(offset[0], offset[1])
-    segment_l = slice(offset[1], offset[2])
-    segment_r = slice(offset[2], offset[3])
-    r_offset = offset[2]
-    l_offset = offset[1]
-    dim_total = offset[-1]
-
-    weight = 1.0 / self.CollectSigma()
-    W = scipy.sparse.diags(weight, 0)
-
-    l0 = self.CollectObservations()
-    if x is None:
-      x  = self.CollectParameters()
-    if l is None:
-      l   = l0.copy()
-    e = l - l0
-    self.variance_factor=0
-
-    b = np.zeros( (dim_total,) )
-    A = np.zeros( (dim_total, dim_total,) )
-    for it in range(maxit):
-      A[segment_l, segment_l] = W.A
-      for cb in self.constraint_blocks:
-        r_slc = slice(cb.r_slc.start + r_offset, cb.r_slc.stop + r_offset )
-        js = cb.g_jacobian(x, l)
-        for var in cb.x_var:
-          M = js.pop(0)
-          A[r_slc, var.place] = M
-          A[var.place, r_slc] = M.T
-        for var in cb.l_var:
-          l_slc = slice(var.place.start + l_offset, var.place.stop + l_offset )
-          M = js.pop(0)
-          A[r_slc, l_slc] = M
-          A[l_slc, r_slc] = M.T
-
-      g = self.EvaluateConstraintResidual(x, l)
-      b[segment_l] = -W.dot(e)
-      b[segment_r] = -g
-
-      s = scipy.linalg.solve(A, b)
-      x += s[segment_x]
-      l += s[segment_l]
-      e = l - l0
-      cost = self.EvaluateObjective(e, weight)
-      if np.abs(cost - self.variance_factor)<1e-6:
-        break
-      print it, cost
-      self.variance_factor = cost
-    return x, e
-
-  def SolveFullMatrixDenseWithParam(self, x=None, l=None, maxit=10):
-    self.UpdateLocalOffset()
-    dim_x = self.NumReducedParameters()
-    dim_l = self.NumReducedObservations()
-    dim_r = self.NumResiduals()
-    offset =  np.cumsum([0, dim_x, dim_l, dim_r])
-    segment_x = slice(offset[0], offset[1])
-    segment_l = slice(offset[1], offset[2])
-    segment_r = slice(offset[2], offset[3])
-    r_offset = offset[2]
-    l_offset = offset[1]
-    dim_total = offset[-1]
-
-    weight = 1.0 / self.CollectSigma()
-
-    l0 = self.CollectObservations()
-    if x is None:
-      x  = self.CollectParameters()
-    if l is None:
-      l   = l0.copy()
-    e = l - l0
-
-    b = np.zeros( (dim_total,) )
-    A = np.zeros( (dim_total, dim_total,) )
-    for it in range(maxit):
-      CTWC, CTWe = self.EvaluateCorrectionJacobianRawSparse(e)
-      A[segment_l, segment_l] = CTWC.A
-      for cb in self.constraint_blocks:
-        r_slc = slice(cb.r_slc.start + r_offset, cb.r_slc.stop + r_offset )
-        js = cb.g_jacobian(x, l)
-        for var in cb.x_var:
-          M = var.param.ToLocalJacobian( js.pop(0) )
-          A[r_slc, var.place_local] = M
-          A[var.place_local, r_slc] = M.T
-        for var in cb.l_var:
-          l_slc = slice(var.place_local.start + l_offset, var.place_local.stop + l_offset )
-          M = var.param.ToLocalJacobian( js.pop(0) )
-          A[r_slc, l_slc] = M
-          A[l_slc, r_slc] = M.T
-
-      g = self.EvaluateConstraintResidual(x, l)
-      b[segment_l] = -CTWe
-      b[segment_r] = -g
-
-      s = scipy.linalg.solve(A, b)
-      x = self.Plus_x(x, s[segment_x])
-      l = self.Plus_l(l, s[segment_l])
-      e = l - l0
-      cost = self.EvaluateObjective(e, weight)
-      if np.abs(cost - self.variance_factor)<1e-6:
-        break
-      print it, cost
-      self.variance_factor = cost
-    return x, e
 
 #%%
 if __name__ == '__main__':
 
   test_CreateSparseMatrix()
+  test_ArrayID()
+  test_CompoundVector()
 
   def EqualityConstraint(a,b):
     return a-b
@@ -782,7 +398,7 @@ if __name__ == '__main__':
   dim_x = 3
   a = np.ones(dim_x)
 
-  num_l = 100
+  num_l = 3
   sigma = 0.02
   s = np.full(dim_x, sigma**2)
 
@@ -792,8 +408,13 @@ if __name__ == '__main__':
     problem.AddConstraintUsingAD(EqualityConstraint,
                                  [ a ],
                                  [ bs[i] ])
+  res = problem.CompoundResidual()
+  Jx,Jl = problem.MakeJacobians()
 
-  Jx,Jl = problem.EvaluateAndUpdateConstraintJacobiantest()
-  Jxd,Jld = problem.EvaluateConstraintJacobian()
-  assert_array_equal(Jx.A, Jxd)
-  assert_array_equal(Jl.A, Jld)
+  problem.EvaluateResidual()
+  problem.EvaluateJacobian()
+
+
+
+
+
