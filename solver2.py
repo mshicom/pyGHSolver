@@ -73,12 +73,12 @@ class ColumnMajorSparseMatrix():
 
     """ 4. Make row and col indices for COO matrix.
         Since the mapping is done, we could use it to collect indivial indice """
-    for submatrix in self.submatrix_list:
-      submatrix._feed_grid_matrix(0)
+    for vec in vectors:
+      vec._feed_row_indice()
     row = data.copy()
 
-    for submatrix in self.submatrix_list:
-      submatrix._feed_grid_matrix(1)
+    for vec in vectors:
+      vec._feed_col_indice()
     col = data.copy()
 
     """ 5. convert to Compressed Sparse Column (CSC)
@@ -119,10 +119,6 @@ class ColumnMajorSparseMatrix():
       for dst, src in zip(self.subvector_list, array.T):
         dst.data[:] = src
 
-    def _feed_grid_matrix(self, which):
-      data = np.mgrid[self.r : self.r + self.dim_vec, self.c : self.c + self.num_vec][which]
-      self.Write(data)
-
     @property
     def data(self):
       if self.subvector_list[0].data is None:
@@ -151,7 +147,12 @@ class ColumnMajorSparseMatrix():
                                offset = start*vector.itemsize)
 
       def _feed_row_indice(self):
-        self.data[:] = np.arange(parent) # parent
+        r0 = self.parent.r
+        r1 = r0 + self.length
+        self.data[:] = np.arange(r0,r1)
+
+      def _feed_col_indice(self):
+        self.data[:] = self.parent.c + self.seq
 
       def __str__(self):
         return "vec at %d row,  %dth segment of array " % (self.parent.r, self.seq) + str(self.data)
@@ -182,10 +183,18 @@ def test_CreateSparseMatrix():
   csm.AddDenseSubMatrix( 1, 1, (2,2) )
   csm.AddDenseSubMatrix( 3, 3, (3,3) )
   sparse = csm.BuildSparseMatrix()
-
   for i in range(3):
     csm.SubMatrixWrite(i, e[i])
   assert_array_equal( sparse.A, dense  )
+
+  # shift
+  dense  = np.empty((4,3))
+  csm = ColumnMajorSparseMatrix()
+  csm.AddDenseSubMatrix( 0, 0, (4,3) )
+  csm.Shift(5,5)
+  sparse = csm.BuildSparseMatrix()
+  assert sparse.shape == (5+4,5+3)
+
 
   print "test_CreateSparseMatrix passed"
 #%% CompoundVector
@@ -462,7 +471,6 @@ def test_ProblemJacobian():
   assert_array_equal( Jl.todense(), DiagonalRepeat(B, num_l) )
 
   print "test_ProblemJacobian passed"
-
 
 
 #%%
