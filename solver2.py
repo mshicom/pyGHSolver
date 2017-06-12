@@ -97,6 +97,10 @@ class ColumnMajorSparseMatrix():
     else:
       return scipy.sparse.coo_matrix( (data, (row, col) ) )
 
+  def Shift(self, delta_r, delta_c):
+    for submat in self.submatrix_list:
+      submat.r += delta_r
+      submat.c += delta_c
 
   class SubMatrix(LexicalSortable):
     """ ordering of submatrix in a column-major sparse matrix """
@@ -118,9 +122,6 @@ class ColumnMajorSparseMatrix():
     def _feed_grid_matrix(self, which):
       data = np.mgrid[self.r : self.r + self.dim_vec, self.c : self.c + self.num_vec][which]
       self.Write(data)
-
-    def SetCoordinate(self, r, c):
-      self.r, self.c = r,c
 
     @property
     def data(self):
@@ -290,10 +291,8 @@ def test_CompoundVector():
 
 
 #%% GaussHelmertProblem
-
-
-ConstraintBlock = namedtuple('ConstraintBlock', ['id', 'g_res', 'g_jac'])
-class GaussHelmertProblem:
+class GaussHelmertProblem(object):
+  ConstraintBlock = namedtuple('ConstraintBlock', ['id', 'g_res', 'g_jac'])
 
   def __init__(self):
     self.cv_x   = CompoundVectorWithDict()
@@ -348,7 +347,7 @@ class GaussHelmertProblem:
       for submat_id in jac_submat_id_l:
         self.csm_l.SubMatrixWrite( submat_id, jac.pop() )
 
-    self.constraint_blocks.append(ConstraintBlock(res_off, g_res, g_jac))
+    self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
 
   def CompoundParameters(self):
@@ -360,26 +359,109 @@ class GaussHelmertProblem:
   def CompoundResidual(self):
     return self.cv_res.flat
 
+  @property
+  def dim_x(self):
+    return self.cv_x.tail
+
+  @property
+  def dim_l(self):
+    return self.cv_l.tail
+
+  @property
+  def dim_res(self):
+    return self.cv_res.tail
+
   def MakeJacobians(self):
     self.Jx = self.csm_x.BuildSparseMatrix()
     self.Jl = self.csm_l.BuildSparseMatrix()
     return self.Jx, self.Jl
 
-  def EvaluateResidual(self, ouput=False):
+  def UpdateResidual(self, ouput=False):
     for cb in self.constraint_blocks:
       cb.g_res()
 
     if ouput:
       return self.cv_res.flat
 
-  def EvaluateJacobian(self, ouput=False):
+  def UpdateJacobian(self, ouput=False):
     for cb in self.constraint_blocks:
       cb.g_jac()
 
     if ouput:
       return self.Jx, self.Jl
 
+#%%
+def EqualityConstraint(a,b):
+  return a-b
+def EqualityConstraintJac(a,b):
+  return np.eye(len(a)), -np.eye(len(b))
 
+def MakeAffineConstraint(A,B):
+  def AffineConstraint(a, b):
+    return A.dot(a) + B.dot(b)
+  return AffineConstraint
+
+def DiagonalRepeat(M, repeats):
+  return scipy.linalg.block_diag(* (M,)*repeats )
+
+def VerticalRepeat(M, repeats):
+  return np.tile( M, (repeats,1) )
+
+def HorizontalRepeat(M, repeats):
+  return np.tile( M, (1, repeats) )
+
+def test_ProblemJacobian():
+  dim_x, num_x = 3, 2
+  dim_l, num_l = 4, 10*num_x
+
+  dim_g = 3
+  A = np.random.rand(dim_g, dim_x)
+  B = np.random.rand(dim_g, dim_l)
+  AffineConstraint = MakeAffineConstraint(A,B)
+
+  x = np.empty((num_x, dim_x))
+  l = [ np.empty((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+
+  problem = GaussHelmertProblem()
+  for i in range(num_x):
+    for j in range(num_l/num_x):
+      problem.AddConstraintUsingAD(AffineConstraint,
+                                   [ x[i] ],
+                                   [ l[i][j] ])
+  # res compound
+  dim_res = dim_g * num_l
+  res = problem.CompoundResidual()
+  assert_equal( res.shape, [ dim_res ]  )
+
+  # x l compound
+  xc = problem.CompoundParameters()
+  assert_equal( xc.shape, [ dim_x * num_x ]  )
+
+  lc = problem.CompoundObservation()
+  assert_equal( lc.shape, [ dim_l * num_l ]  )
+
+  # write xl, read res and  UpdateResidual()
+  xc[:] = 0
+  lc[:] = 0
+  problem.UpdateResidual()
+  assert_array_equal(res, np.zeros(dim_res) )
+
+  # OverWriteOrigin
+  xc[:] = 1
+  problem.cv_x.OverWriteOrigin()
+  assert_array_equal(x, np.ones((num_x, dim_x)))
+
+  # Create Jacobian
+  Jx,Jl = problem.MakeJacobians()
+  assert_equal( Jx.shape, (dim_res, dim_x*num_x) )
+  assert_equal( Jl.shape, (dim_res, dim_l*num_l) )
+
+  # Evaluate Jacobian
+  problem.UpdateJacobian()
+  assert_array_equal( Jx.todense(), DiagonalRepeat( VerticalRepeat(A, num_l/num_x), num_x) )
+  assert_array_equal( Jl.todense(), DiagonalRepeat(B, num_l) )
+
+  print "test_ProblemJacobian passed"
 
 
 
@@ -389,32 +471,26 @@ if __name__ == '__main__':
   test_CreateSparseMatrix()
   test_ArrayID()
   test_CompoundVector()
+  test_ProblemJacobian()
 
-  def EqualityConstraint(a,b):
-    return a-b
-  def EqualityConstraintJac(a,b):
-    return np.eye(len(a)), -np.eye(len(b))
-  np.random.seed(0)
-  dim_x = 3
-  a = np.ones(dim_x)
 
-  num_l = 3
-  sigma = 0.02
-  s = np.full(dim_x, sigma**2)
+  dim_x, num_x = 3, 2
+  dim_l, num_l = 4, 10*num_x
 
-  bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
+  dim_g = 3
+  A = np.random.rand(dim_g, dim_x)
+  B = np.random.rand(dim_g, dim_l)
+  AffineConstraint = MakeAffineConstraint(A,B)
+
+  x = np.empty((num_x, dim_x))
+  l = [ np.empty((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+
   problem = GaussHelmertProblem()
-  for i in range(num_l):
-    problem.AddConstraintUsingAD(EqualityConstraint,
-                                 [ a ],
-                                 [ bs[i] ])
+  for i in range(num_x):
+    for j in range(num_l/num_x):
+      problem.AddConstraintUsingAD(AffineConstraint,
+                                   [ x[i] ],
+                                   [ l[i][j] ])
   res = problem.CompoundResidual()
-  Jx,Jl = problem.MakeJacobians()
-
-  problem.EvaluateResidual()
-  problem.EvaluateJacobian()
-
-
-
-
-
+  xc = problem.CompoundParameters()
+  lc = problem.CompoundObservation()
