@@ -26,210 +26,6 @@ class LexicalSortable(object):
   def __lt__(self, other):
     return self.key() < other.key()
 
-class ColumnMajorSparseMatrix():
-
-  def __init__(self, shape=None):
-    self.shape = shape
-    self.submatrix_list = []
-    self.data = None
-    self.row  = None
-    self.col  = None
-    self.indptr = None
-
-  def AddDenseSubMatrix(self, row0, col0, shape):
-    id = len(self.submatrix_list)
-    self.submatrix_list.append( self.SubMatrix(row0, col0, shape) )
-    return id
-
-  def SubMatrixWrite(self, id, src):
-    self.submatrix_list[id].Write( src )
-
-  def BuildSparseMatrix(self, coo=False):
-    """ 1. sort the submatrix to a column-major flat list """
-    self.submatrix_list.sort()
-    num_submatrix = len(self.submatrix_list)
-
-    """ 2. gather the submatrixs of the same column in a group, collect
-        their sub vectors and sort them again into column major """
-    vectors = []
-    heap = []
-    for i in range( num_submatrix ):
-      current = self.submatrix_list[i]
-      heap.extend(current.subvector_list)
-
-      # reached the last submatrix of this column or the end
-      if i == num_submatrix-1 or self.submatrix_list[i+1].c != current.c:
-        # process this group
-        vectors.extend( sorted(heap) )
-        # reset the heap and start the new
-        heap = []
-
-    """ 3. assign vector segments to slices """
-    len_list = [vec.length for vec in vectors]
-    offset = np.cumsum( [0] + len_list )
-    nnz = offset[-1]
-    data = np.empty(nnz)
-    for start, vec in zip(offset.tolist(), vectors):
-      vec.Mapto(data, start)  # vec.data = data[start : start + vec.length]
-
-    """ 4. Make row and col indices for COO matrix.
-        Since the mapping is done, we could use it to collect indivial indice """
-    for vec in vectors:
-      vec._feed_row_indice()
-    row = data.astype('i').copy()
-
-    for vec in vectors:
-      vec._feed_col_indice()
-    col = data.astype('i').copy()
-
-    """ update shape info"""
-    shape = (row.max()+1, col[-1]+1)
-    if self.shape is None:
-      self.shape = shape
-    else:
-      self.shape = tuple(np.max([shape, self.shape], axis=0))
-
-    """ 5. convert to Compressed Sparse Column (CSC)
-    * compressed(col) -> indices, where only the heads of each col are recorded
-    """
-    if 1:  # fast version
-      indptr, = np.where( np.diff(col) )  # np.diff : out[n] = a[n+1]-a[n]
-      indptr = np.r_[0, indptr+1, nnz]
-    else:  # slow version
-      indptr = np.array([0] + [ i for i in xrange(1, nnz) if col[i] != col[i-1] ] + [nnz])
-
-    self.data, self.col, self.row, self.indptr = data, col, row, indptr
-
-    if coo:
-      return scipy.sparse.csc_matrix( (data, row, indptr), shape=self.shape)
-    else:
-      return scipy.sparse.coo_matrix( (data, (row, col) ), shape=self.shape)
-
-  def Shift(self, delta_r, delta_c):
-    for submat in self.submatrix_list:
-      submat.r += delta_r
-      submat.c += delta_c
-
-  def ComputeShape(self):
-    bottom_mat = max(self.submatrix_list, key=lambda o : o.r + o.dim_vec)
-    right_mat  = max(self.submatrix_list, key=lambda o : o.c + o.num_vec)
-    r = bottom_mat.r + bottom_mat.dim_vec
-    c = right_mat.c  + right_mat.num_vec
-    return r, c
-
-  def Append(self, other):
-    if self.shape is None:
-      offset_r, offset_c = self.ComputeShape()
-    else:
-      offset_r, offset_c = self.shape
-
-    other_list = copy(other.submatrix_list)
-    for submat in other_list:
-#      submat.r += offset_r
-      submat.c += offset_c
-    self.submatrix_list.extend(other_list)
-
-
-  class SubMatrix(LexicalSortable):
-    """ ordering of submatrix in a column-major sparse matrix """
-    def __init__(self, r, c, array_shape): #
-      self.r, self.c = r,c
-      self.dim_vec, self.num_vec = array_shape[:2]
-      self.subvector_list = [self.SubVector(self, i, self.dim_vec) for i in range(self.num_vec)]
-      self.buf = np.empty((self.dim_vec, self.num_vec), order='F').T
-
-    def key(self):
-      return (self.c, self.r)
-
-    def Write(self, array):
-      if self.subvector_list[0].data is None:
-        raise RuntimeError("slice not assigned yet")
-      for dst, src in zip(self.subvector_list, array.T):
-        dst.data[:] = src
-
-    @property
-    def data(self):
-      if self.subvector_list[0].data is None:
-        return None
-      for src, dst in zip(self.subvector_list, self.buf):
-        dst[:] = src.data[:]
-      return self.buf.T
-
-    def __str__(self):
-      return "SubMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
-    __repr__ = __str__
-
-    class SubVector(LexicalSortable):
-      def __init__(self, parent, seq, length):
-        self.parent = parent
-        self.seq = seq
-        self.length = length
-        self.data = None
-
-      def key(self):
-        return (self.seq, self.parent.r)
-
-      def Mapto(self, vector, start):
-        self.data = np.ndarray(shape  = (self.length,),
-                               buffer = vector,
-                               offset = start*vector.itemsize)
-
-      def _feed_row_indice(self):
-        r0 = self.parent.r
-        r1 = r0 + self.length
-        self.data[:] = np.arange(r0,r1)
-
-      def _feed_col_indice(self):
-        self.data[:] = self.parent.c + self.seq # all the data share the same column
-
-      def __str__(self):
-        return "vec at %d row,  %dth segment of array " % (self.parent.r, self.seq) + str(self.data)
-      __repr__ = __str__
-def test_CreateSparseMatrix():
-  dense  = np.empty((4,3))
-
-  csm = ColumnMajorSparseMatrix()
-  csm.AddDenseSubMatrix( 0, 0, (4,3) )
-  sparse = csm.BuildSparseMatrix()
-  assert sparse.shape == dense.shape
-
-  # write function
-  dense1  = np.arange(12).reshape(4,3)
-
-  csm1 = ColumnMajorSparseMatrix()
-  csm1.AddDenseSubMatrix( 0, 0, (4,3) )
-  sparse1 = csm1.BuildSparseMatrix()
-  csm1.SubMatrixWrite(0, dense1)
-  assert_array_equal( sparse1.A, dense1 )
-
-  # multiple matrix
-  e = [np.ones(1), 2*np.eye(2), 3*np.eye(3)]
-  dense  = scipy.linalg.block_diag(*e)
-  csm2 = ColumnMajorSparseMatrix()
-  csm2.AddDenseSubMatrix( 0, 0, (1,1) )
-  csm2.AddDenseSubMatrix( 1, 1, (2,2) )
-  csm2.AddDenseSubMatrix( 3, 3, (3,3) )
-  sparse2 = csm2.BuildSparseMatrix()
-  for i in range(3):
-    csm2.SubMatrixWrite(i, e[i])
-  assert_array_equal( sparse2.A, dense  )
-
-  # shift
-  dense  = np.empty((4,3))
-  csm = ColumnMajorSparseMatrix()
-  csm.AddDenseSubMatrix( 0, 0, (4,3) )
-  csm.Shift(5,5)
-  sparse = csm.BuildSparseMatrix()
-  assert sparse.shape == (5+4,5+3)
-
-  # merge
-  csm1.Append(csm2)
-  sparse = csm1.BuildSparseMatrix()
-  csm1.data[:] =1
-  print "test_CreateSparseMatrix passed"
-
-#%%
-
 class MatrixTreeNode(LexicalSortable):
   def __init__(self, parent, r, c):
     self.parent = parent
@@ -237,7 +33,7 @@ class MatrixTreeNode(LexicalSortable):
     self.c = c
     self.elements = []
     self.lexical_key = [(),()]
-    self.absolute_pos = [r, c]
+    self.absolute_pos = None
 
   def AddElement(self, e):
     e.parent = self
@@ -265,17 +61,21 @@ class MatrixTreeNode(LexicalSortable):
         for c in child.__call__(type):
           yield c
 
-  def PropogateAbsolutePos(self, offset=[0,0]):
-    self.absolute_pos[0] = offset[0] + self.r
-    self.absolute_pos[1] = offset[1] + self.c
+  def PropogateAbsolutePos(self, pos=np.zeros(2,'i')):
+    """ The abs_pos of root is always (0,0). The parent node is responsible for
+        calculating their children's pos and the children simply accept it
+    """
+    self.absolute_pos = pos
     for e in self.elements:
-      e.PropogateAbsolutePos(self.absolute_pos)
+      child_pos = self.absolute_pos + [e.r, e.c]
+      e.PropogateAbsolutePos(child_pos)
 
   def PropogateKeyPrefix(self, prefix=[(),()] ): # empty prefix for root
-    self.lexical_key[0] = prefix[0] + (self.r,)
-    self.lexical_key[1] = prefix[1] + (self.c,)
+    self.lexical_key[0] = prefix[0]
+    self.lexical_key[1] = prefix[1]
     for e in self.elements:
-      e.PropogateKeyPrefix(self.lexical_key)
+      child_key = (self.lexical_key[0] + (e.r,), self.lexical_key[1] + (e.c,))
+      e.PropogateKeyPrefix(child_key)
 
   def __repr__(self):
     return str(type(self)) + "at (%d, %d)" % self.absolute_pos
@@ -364,6 +164,10 @@ class SparseBlock(MatrixTreeNode):
   def PutDenseMatrix(self, id, src):
     self.elements[id].Write( src )
 
+  def OverwriteRC(self, r, c):
+    self.r = r
+    self.c = c
+
 class DenseMatrix(MatrixTreeNode):
   def __init__(self, r, c, shape):
     super(DenseMatrix, self).__init__(None, r, c)
@@ -387,6 +191,10 @@ class DenseMatrix(MatrixTreeNode):
     for src, dst in zip(self.elements, self.buf):
       dst[:] = src.data[:]
     return self.buf.T
+
+  def __repr__(self):
+      return "DenseMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
+
 
 class DenseMatrixSegment(MatrixTreeNode):
   def __init__(self, parent, seq, length):
@@ -419,13 +227,11 @@ class DenseMatrixSegment(MatrixTreeNode):
   def ComputeShape(self):
     return (self.length,)
 
-
-
 def test_MatrixTreeNode():
 
   sb = SparseBlock()
-  sb.NewDenseMatrix( 0, 0, (4,3) )
-  sb.NewDenseMatrix( 0, 3, (2,3) )
+  id1 = sb.NewDenseMatrix( 0, 0, (4,3) )
+  id2 = sb.NewDenseMatrix( 0, 3, (2,3) )
 
   # iterator
   assert len(list(sb(SparseBlock))) == 1
@@ -435,12 +241,12 @@ def test_MatrixTreeNode():
   # PropogateKeyPrefix
   sb.PropogateKeyPrefix()
   assert_equal([s.key() for s in sb(DenseMatrixSegment)],
-               [(0, 0, 0, 0, 0, 0),
-                (0, 0, 1, 0, 0, 0),
-                (0, 0, 2, 0, 0, 0),
-                (0, 3, 0, 0, 0, 0),
-                (0, 3, 1, 0, 0, 0),
-                (0, 3, 2, 0, 0, 0)] )
+               [(0, 0, 0, 0),
+                (0, 1, 0, 0),
+                (0, 2, 0, 0),
+                (3, 0, 0, 0),
+                (3, 1, 0, 0),
+                (3, 2, 0, 0)] )
 
   # PropogateAbsolutePos
   sb.PropogateAbsolutePos()
@@ -448,7 +254,7 @@ def test_MatrixTreeNode():
     [s.absolute_pos for s in sb(DenseMatrixSegment)],
     [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]])
 
-  sb.PropogateAbsolutePos([1,2])
+  sb.PropogateAbsolutePos(np.array([1,2]))
   assert_equal(
     [s.absolute_pos for s in sb(DenseMatrixSegment)],
     [[1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [1, 7]])
@@ -462,10 +268,15 @@ def test_MatrixTreeNode():
                      [  2.,   6.,  10.,   0.,   0.,   0.],
                      [  3.,   7.,  11.,   0.,   0.,   0.]])
 
+  # write
+  dm = np.arange(6).reshape(2,3)
+  sb.PutDenseMatrix(id2, dm)
+  assert_array_equal(sbm.A[0:2,3:6], dm)
+
   # CompoundMatrix
   cm = CompoundMatrix()
-  sb2 = SparseBlock()
-  sb2.NewDenseMatrix( 4, 6, (3,3) )
+  sb2 = SparseBlock(4, 6)
+  id = sb2.NewDenseMatrix( 0, 0, (3,3) )
 
   cm.AddElement(sb)
   cm.AddElement(sb2)
@@ -484,7 +295,14 @@ def test_MatrixTreeNode():
                      [  0.,   0.,   0.,   0.,   0.,   0.,  19.,  22.,  25.],
                      [  0.,   0.,   0.,   0.,   0.,   0.,  20.,  23.,  26.]])
 
-test_MatrixTreeNode()
+  # Subblock of CompoundMatrix should be still functional
+  sbm2 = sb2.BuildSparseMatrix()
+  dm = np.arange(9).reshape(3,3)
+  sb2.PutDenseMatrix(0, dm)
+  assert_array_equal(sbm2.A, dm)
+
+  print "test_MatrixTreeNode passed"
+
 #%% CompoundVector
 class ArrayID(object):
   __slots__ = 'addr','data'
@@ -596,8 +414,10 @@ class GaussHelmertProblem(object):
     self.cv_l   = CompoundVectorWithDict()
     self.cv_res = CompoundVector()
 
-    self.csm_x = ColumnMajorSparseMatrix()
-    self.csm_l = ColumnMajorSparseMatrix()
+    self.KKTmat = CompoundMatrix()
+    self.mat_jac_x = SparseBlock()
+    self.mat_jac_l = SparseBlock()
+
     self.Jx, self.Jl = None,None
 
     self.constraint_blocks = []    # list of ConstraintBlock
@@ -627,8 +447,8 @@ class GaussHelmertProblem(object):
     """ 3. Compound vector for constraint residual """
     res_off, res_vec = self.cv_res.MakeVector(dim_res)
 
-    jac_submat_id_x = [ self.csm_x.AddDenseSubMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
-    jac_submat_id_l = [ self.csm_l.AddDenseSubMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
+    jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
+    jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
 
     """ 4. Generate constraint functor that use the mapped vectors """
     def g_res():
@@ -639,10 +459,10 @@ class GaussHelmertProblem(object):
       jac = np.split(J, xl_indices, axis=1)
       jac.reverse() # reversed, to pop(-1) instead of pop(0)
       for submat_id in jac_submat_id_x:
-        self.csm_x.SubMatrixWrite( submat_id, jac.pop() )
+        self.mat_jac_x.PutDenseMatrix( submat_id, jac.pop() )
 
       for submat_id in jac_submat_id_l:
-        self.csm_l.SubMatrixWrite( submat_id, jac.pop() )
+        self.mat_jac_l.PutDenseMatrix( submat_id, jac.pop() )
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
@@ -669,8 +489,8 @@ class GaussHelmertProblem(object):
     return self.cv_res.tail
 
   def MakeJacobians(self):
-    self.Jx = self.csm_x.BuildSparseMatrix()
-    self.Jl = self.csm_l.BuildSparseMatrix()
+    self.Jx = self.mat_jac_x.BuildSparseMatrix()
+    self.Jl = self.mat_jac_l.BuildSparseMatrix()
     return self.Jx, self.Jl
 
   def UpdateResidual(self, ouput=False):
@@ -764,7 +584,7 @@ def test_ProblemJacobian():
 #%%
 if __name__ == '__main__':
 
-  test_CreateSparseMatrix()
+  test_MatrixTreeNode()
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
@@ -791,22 +611,6 @@ if __name__ == '__main__':
   xc = problem.CompoundParameters()
   lc = problem.CompoundObservation()
 
-  J = ColumnMajorSparseMatrix()
-
-  def walk(node):
-    """ iterate tree in pre-order depth-first search order """
-    yield node
-    for child in node.elements:
-        for n in walk(child):
-            yield n
-
-
-#  class MatrixTree(object):
-#    def __init__(self):
-
-
-
-#  sp = wm.BuildSparseMatrix()
 
 
 
