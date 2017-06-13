@@ -80,19 +80,6 @@ class MatrixTreeNode(LexicalSortable):
   def __repr__(self):
     return str(type(self)) + "at (%d, %d)" % self.absolute_pos
 
-#  def ComputeShape(self):
-#    self.PropogateKeyPrefix()
-#
-#    mats = list(self(DenseMatrix))
-#    right_mat  = max(mats, key=lambda m: m.lexical_key[0])
-#    bottom_mat = max(mats, key=lambda m: m.lexical_key[1])
-#
-#    bottom_mat = max(mats, key=lambda m : m.absolute_pos[0] + m.dim_vec)
-#    right_mat  = max(mats, key=lambda m : m.absolute_pos[1] + m.num_vec)
-#    r = bottom_mat.r + bottom_mat.dim_vec
-#    c = right_mat.c  + right_mat.num_vec
-#    return r, c
-
   def BuildSparseMatrix(self, coo=False):
     self.PropogateKeyPrefix()
 
@@ -111,24 +98,14 @@ class MatrixTreeNode(LexicalSortable):
     self.data = data
     self.nnz  = nnz
 
-    """ 3. Make row and col indices for COO matrix.
-        Since the mapping is done, we could use it to collect indivial indice """
+    """ 3. Put data"""
+    for m in self(CachedMatrix):
+      m.Flush()
+
+    """ 4. Make row and col indices for COO matrix """
     self.PropogateAbsolutePos()
-
-    for vec in vectors:
-      vec._feed_row_indice()
-    row = data.astype('i').copy()
-
-    for vec in vectors:
-      vec._feed_col_indice()
-    col = data.astype('i').copy()
-
-#    """ update shape info"""
-#    shape = (row.max()+1, col[-1]+1)
-#    if self.shape is None:
-#      self.shape = shape
-#    else:
-#      self.shape = tuple(np.max([shape, self.shape], axis=0))
+    row = np.hstack(vec.row_indice() for vec in vectors)
+    col = np.hstack(vec.col_indice() for vec in vectors)
 
     """ 5. convert to Compressed Sparse Column (CSC)
     * compressed(col) -> indices, where only the heads of each col are recorded
@@ -169,13 +146,33 @@ class SparseBlock(MatrixTreeNode):
   def PutDenseMatrix(self, id, src):
     self.elements[id].Write( src )
 
+  def PutDenseMatrixInCache(self, id, src):
+    self.elements[id].WriteCache( src )
+
   def OverwriteRC(self, r, c):
     self.r = r
     self.c = c
 
-class DenseMatrix(MatrixTreeNode):
+class CachedMatrix(object):
+  def __init__(self):
+    self.cache = None
+
+  def Write(array):
+    raise NotImplementedError()
+
+  def WriteCache(self, array):
+    self.cache = array.copy()
+
+  def Flush(self):
+    if self.cache is None:
+      return
+
+    self.Write(self.cache)
+
+class DenseMatrix(MatrixTreeNode, CachedMatrix):
   def __init__(self, r, c, shape):
     super(DenseMatrix, self).__init__(None, r, c)
+    CachedMatrix.__init__(self)
 
     self.dim_vec, self.num_vec = shape[:2]
     for seq in xrange(self.num_vec):
@@ -200,9 +197,10 @@ class DenseMatrix(MatrixTreeNode):
   def __repr__(self):
       return "DenseMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
 
-class DiagonalMatrix(MatrixTreeNode):
+class DiagonalMatrix(MatrixTreeNode, CachedMatrix):
   def __init__(self, r, c, dim):
     super(DiagonalMatrix, self).__init__(None, r, c)
+    CachedMatrix.__init__(self)
 
     self.dim = dim
     for seq in xrange(dim):
@@ -242,13 +240,13 @@ class DenseMatrixSegment(MatrixTreeNode):
                            buffer = vector,
                            offset = start*vector.itemsize)
 
-  def _feed_row_indice(self):
+  def row_indice(self):
     r0 = self.absolute_pos[0]
     r1 = r0 + self.length
-    self.data[:] = np.arange(r0,r1)
+    return np.arange(r0, r1, dtype='i')
 
-  def _feed_col_indice(self):
-    self.data[:] = self.absolute_pos[1] # all the data share the same column
+  def col_indice(self):
+    return np.full(self.length, self.absolute_pos[1], dtype='i') # all the data share the same column
 
   def __repr__(self):
     return str(self.key()) + " len:" + str(self.length)
@@ -342,9 +340,23 @@ def test_MatrixTreeNode():
   id = sb.NewDiagonalMatrix(0,0,4)
   sbm = sb.BuildSparseMatrix()
   sb.PutDenseMatrix(id, np.arange(4))
-  sbm.A
+  assert_array_equal(sbm.A, np.diag(np.arange(4)))
 
+  # Cache
+  sb = SparseBlock()
+  id1 = sb.NewDenseMatrix(0,0,(2,2))
+  id2 = sb.NewDiagonalMatrix(2,2,4)
+  sb.PutDenseMatrixInCache(id1, np.full((2,2), -1))
+  sb.PutDenseMatrixInCache(id2, np.full(4, 2))
 
+  sbm = sb.BuildSparseMatrix()
+  assert_array_equal(sbm.A,
+                    [[-1., -1.,  0.,  0.,  0.,  0.],
+                     [-1., -1.,  0.,  0.,  0.,  0.],
+                     [ 0.,  0.,  2.,  0.,  0.,  0.],
+                     [ 0.,  0.,  0.,  2.,  0.,  0.],
+                     [ 0.,  0.,  0.,  0.,  2.,  0.],
+                     [ 0.,  0.,  0.,  0.,  0.,  2.]])
   print "test_MatrixTreeNode passed"
 
 #%% CompoundVector
