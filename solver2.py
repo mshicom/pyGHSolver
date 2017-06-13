@@ -80,7 +80,7 @@ class MatrixTreeNode(LexicalSortable):
   def __repr__(self):
     return str(type(self)) + "at (%d, %d)" % self.absolute_pos
 
-  def BuildSparseMatrix(self, coo=False):
+  def BuildSparseMatrix(self, shape=None, coo=False):
     self.PropogateKeyPrefix()
 
     """ 1. lexical sort of all the DenseMatrixSegment,(i.e leaves of the tree),
@@ -98,7 +98,7 @@ class MatrixTreeNode(LexicalSortable):
     self.data = data
     self.nnz  = nnz
 
-    """ 3. Put data"""
+    """ 3. Write cached data """
     for m in self(CachedMatrix):
       m.Flush()
 
@@ -107,19 +107,28 @@ class MatrixTreeNode(LexicalSortable):
     row = np.hstack(vec.row_indice() for vec in vectors)
     col = np.hstack(vec.col_indice() for vec in vectors)
 
+
     """ 5. convert to Compressed Sparse Column (CSC)
-    * compressed(col) -> indices, where only the heads of each col are recorded
+    * compressed(col) -> indices, where only the heads of each col are recorded,
+    if there are all-zero columns in right (ie. shape[1] > col[-1]), we should
+    repeat
     """
+    if shape and shape[1]>col[-1]:
+      rep = shape[1] - col[-1]
+    else:
+      rep = 1
+
     if 1:  # fast version
       indptr, = np.where( np.diff(col) )  # np.diff : out[n] = a[n+1]-a[n]
-      indptr = np.r_[0, indptr+1, nnz]
+      indptr = np.r_[0, indptr+1, [nnz]*rep]
     else:  # slow version
-      indptr = np.array([0] + [ i for i in xrange(1, nnz) if col[i] != col[i-1] ] + [nnz])
+      indptr = np.array([0] + [ i for i in xrange(1, nnz) if col[i] != col[i-1] ] + [nnz]*rep)
 
+    self.indptr = indptr
     if coo:
-      return scipy.sparse.csc_matrix( (data, row, indptr))#, shape=self.shape
+      return scipy.sparse.coo_matrix( (data, (row, col) ), shape=shape)#, shape=self.shape
     else:
-      return scipy.sparse.coo_matrix( (data, (row, col) ))#, shape=self.shape
+      return scipy.sparse.csc_matrix( (data, row, indptr), shape=shape)#, shape=self.shape
 
 class CompoundMatrix(MatrixTreeNode):
   def __init__(self):
@@ -234,8 +243,8 @@ class DenseMatrixSegment(MatrixTreeNode):
     self.data = None
 
   def Mapto(self, vector, start):
-#    if not self.data is None:
-#      raise RuntimeWarning("Segments being remapped")
+    if not self.data is None:
+      raise UserWarning("Segments being remapped")
     self.data = np.ndarray(shape  = (self.length,),
                            buffer = vector,
                            offset = start*vector.itemsize)
@@ -309,6 +318,9 @@ def test_MatrixTreeNode():
 
   # CompoundMatrix
   cm = CompoundMatrix()
+  sb = SparseBlock()
+  id1 = sb.NewDenseMatrix( 0, 0, (4,3) )
+  id2 = sb.NewDenseMatrix( 0, 3, (2,3) )
   sb2 = SparseBlock(4, 6)
   id = sb2.NewDenseMatrix( 0, 0, (3,3) )
 
@@ -328,12 +340,6 @@ def test_MatrixTreeNode():
                      [  0.,   0.,   0.,   0.,   0.,   0.,  18.,  21.,  24.],
                      [  0.,   0.,   0.,   0.,   0.,   0.,  19.,  22.,  25.],
                      [  0.,   0.,   0.,   0.,   0.,   0.,  20.,  23.,  26.]])
-
-  # Subblock of CompoundMatrix should be still functional
-  sbm2 = sb2.BuildSparseMatrix()
-  dm = np.arange(9).reshape(3,3)
-  sb2.PutDenseMatrix(0, dm)
-  assert_array_equal(sbm2.A, dm)
 
   # DiagonalMatrix
   sb = SparseBlock()
@@ -478,7 +484,11 @@ class GaussHelmertProblem(object):
     self.mat_jac_x = SparseBlock(1,0)
     self.mat_jac_l = SparseBlock(1,1)
 
-    self.Jx, self.Jl = None,None
+    self.mat_kkt.AddElement(self.mat_w)
+    self.mat_kkt.AddElement(self.mat_jac_x)
+    self.mat_kkt.AddElement(self.mat_jac_l)
+
+    self.Jx, self.Jl, self.W = None,None, None
 
     self.constraint_blocks = []    # list of ConstraintBlock
     self.variance_factor = -1.0
@@ -507,7 +517,9 @@ class GaussHelmertProblem(object):
 
       if not offset in self.dict_observation_block:
         dim_l = len(l)
-        mat_w_id = self.mat_w.NewDenseMatrix(offset, offset, (dim_l, dim_l))
+        mat_w_id = self.mat_w.NewDiagonalMatrix(offset, offset, dim_l)
+        self.mat_w.PutDenseMatrixInCache(mat_w_id, np.ones(dim_l))
+
         item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_w_id )
         self.dict_observation_block[offset] = item
     return l_off, l_vec
@@ -567,7 +579,7 @@ class GaussHelmertProblem(object):
     for ar, si in zip(array, sigma):
       l_off, _ = self.cv_l.FindVector(ar)
       if not l_off is None:
-        self.mat_w.PutDenseMatrix( self.dict_observation_block[l_off].mat_w_id, np.diag(si) )
+        self.mat_w.PutDenseMatrixInCache( self.dict_observation_block[l_off].mat_w_id, 1./si )
 
   def SetParameterization(self, array, parameterization):
     var = VariableBlock(array)
@@ -604,6 +616,21 @@ class GaussHelmertProblem(object):
     self.Jl = self.mat_jac_l.BuildSparseMatrix()
 
     return self.Jx, self.Jl
+
+  def MakeWeightMatrix(self):
+    self.W = self.mat_w.BuildSparseMatrix()
+    return self.W
+
+  def MakeKKTMatrix(self):
+    dim_x, dim_l, dim_res = self.dim_x, self.dim_l, self.dim_res
+    dim_total = dim_x + dim_l + dim_res
+
+    self.mat_w.OverwriteRC(dim_x, dim_x)
+    self.mat_jac_x.OverwriteRC(dim_x+dim_l, 0)
+    self.mat_jac_l.OverwriteRC(dim_x+dim_l, dim_x)
+
+    kkt = self.mat_kkt.BuildSparseMatrix((dim_total,dim_total))
+    return kkt
 
   def UpdateResidual(self, ouput=False):
     for cb in self.constraint_blocks:
@@ -650,13 +677,15 @@ def test_ProblemJacobian():
 
   x = np.empty((num_x, dim_x))
   l = [ np.empty((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
-
+  sigma = np.full(dim_l, 0.5)
   problem = GaussHelmertProblem()
   for i in range(num_x):
     for j in range(num_l/num_x):
       problem.AddConstraintUsingAD(AffineConstraint,
                                    [ x[i] ],
                                    [ l[i][j] ])
+      problem.SetSigma(l[i][j], sigma)
+
   # res compound
   dim_res = dim_g * num_l
   res = problem.CompoundResidual()
@@ -691,7 +720,8 @@ def test_ProblemJacobian():
   assert_array_equal( Jl.todense(), DiagonalRepeat(B, num_l) )
 
   # weight
-#  problem.SetSigma()
+  W = problem.MakeWeightMatrix()
+  assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
 
   print "test_ProblemJacobian passed"
 
@@ -705,8 +735,8 @@ if __name__ == '__main__':
   test_ProblemJacobian()
 
 
-  dim_x, num_x = 3, 2
-  dim_l, num_l = 4, 10*num_x
+  dim_x, num_x = 3, 1
+  dim_l, num_l = 4, 3*num_x
 
   dim_g = 3
   A = np.random.rand(dim_g, dim_x)
@@ -725,7 +755,9 @@ if __name__ == '__main__':
   res = problem.CompoundResidual()
   xc = problem.CompoundParameters()
   lc = problem.CompoundObservation()
-
-
+  kkt = problem.MakeKKTMatrix()
+  a = kkt.A
+  problem.UpdateJacobian()
+  op = CholeskyOperator(kkt)
 
 
