@@ -102,11 +102,12 @@ class MatrixTreeNode(LexicalSortable):
 
     """ 2. assign segments to the compound data vector   """
     len_list = [vec.length for vec in vectors]
-    offset = np.cumsum( [0] + len_list )
+    offset = np.cumsum( [0] + len_list ).tolist()
     nnz = offset[-1]
     data = np.empty(nnz)
-    for start, vec in zip(offset.tolist(), vectors):
+    for start, vec in zip(offset, vectors):
       vec.Mapto(data, start)  # vec.data = data[start : start + vec.length]
+    # cache intermedia result
     self.data = data
     self.nnz  = nnz
 
@@ -161,6 +162,10 @@ class SparseBlock(MatrixTreeNode):
     dm = DenseMatrix(r, c, shape)
     return self.AddElement(dm)
 
+  def NewDiagonalMatrix(self, r, c, dim):
+    dm = DiagonalMatrix(r, c, dim)
+    return self.AddElement(dm)
+
   def PutDenseMatrix(self, id, src):
     self.elements[id].Write( src )
 
@@ -174,7 +179,7 @@ class DenseMatrix(MatrixTreeNode):
 
     self.dim_vec, self.num_vec = shape[:2]
     for seq in xrange(self.num_vec):
-      self.AddElement(DenseMatrixSegment(self, seq, self.dim_vec))
+      self.AddElement(DenseMatrixSegment(self, 0, seq, self.dim_vec))
 
     self.buf = np.empty((self.dim_vec, self.num_vec), order='F').T
 
@@ -195,17 +200,44 @@ class DenseMatrix(MatrixTreeNode):
   def __repr__(self):
       return "DenseMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
 
+class DiagonalMatrix(MatrixTreeNode):
+  def __init__(self, r, c, dim):
+    super(DiagonalMatrix, self).__init__(None, r, c)
+
+    self.dim = dim
+    for seq in xrange(dim):
+      self.AddElement(DenseMatrixSegment(self, seq, seq, 1))
+
+    self.buf = np.empty(dim)
+
+  def Write(self, array):
+    if self.elements[0].data is None:
+      raise RuntimeError("slice not assigned yet")
+    for dst, src in zip(self.elements, array.tolist()):
+      dst.data[:] = src
+
+  @property
+  def data(self):
+    if self.elements[0].data is None:
+      return None
+
+    for i, src in enumerate(self.elements):
+      self.buf[i] = src.data[:]
+    return self.buf
+
+  def __repr__(self):
+      return "DiagonalMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
+
 
 class DenseMatrixSegment(MatrixTreeNode):
-  def __init__(self, parent, seq, length):
-    super(DenseMatrixSegment, self).__init__(parent, 0, seq)
+  def __init__(self, parent, r, seq, length):
+    super(DenseMatrixSegment, self).__init__(parent, r, seq)
     self.length = length
     self.data = None
 
-  def isLeaf(self):
-    return True
-
   def Mapto(self, vector, start):
+#    if not self.data is None:
+#      raise RuntimeWarning("Segments being remapped")
     self.data = np.ndarray(shape  = (self.length,),
                            buffer = vector,
                            offset = start*vector.itemsize)
@@ -222,7 +254,7 @@ class DenseMatrixSegment(MatrixTreeNode):
     return str(self.key()) + " len:" + str(self.length)
 
   def BuildSparseMatrix(self):
-    raise RuntimeError("BuildSparseMatrix not supported in DenseMatrixSegment level")
+    raise RuntimeError("BuildSparseMatrix is not supported in DenseMatrixSegment level")
 
   def ComputeShape(self):
     return (self.length,)
@@ -273,6 +305,10 @@ def test_MatrixTreeNode():
   sb.PutDenseMatrix(id2, dm)
   assert_array_equal(sbm.A[0:2,3:6], dm)
 
+  # read
+  dml = list(sb(DenseMatrix))
+  assert_array_equal(dml[1].data, dm)
+
   # CompoundMatrix
   cm = CompoundMatrix()
   sb2 = SparseBlock(4, 6)
@@ -300,6 +336,14 @@ def test_MatrixTreeNode():
   dm = np.arange(9).reshape(3,3)
   sb2.PutDenseMatrix(0, dm)
   assert_array_equal(sbm2.A, dm)
+
+  # DiagonalMatrix
+  sb = SparseBlock()
+  id = sb.NewDiagonalMatrix(0,0,4)
+  sbm = sb.BuildSparseMatrix()
+  sb.PutDenseMatrix(id, np.arange(4))
+  sbm.A
+
 
   print "test_MatrixTreeNode passed"
 
@@ -352,21 +396,21 @@ class CompoundVectorWithDict(CompoundVector):
     self.vec_dict = {}
     super(CompoundVectorWithDict, self).__init__(cap)
 
-  def AddVector(self, vector_list):
-    ret = []
-    for v in vector_list:
-      """ 1. check whether it is a newcomer, use address as hash"""
-      key = ArrayID(v)
-      if key not in self.vec_dict:
-        """ 2. Make new segment on the tail """
-        new_item = self.MakeVector(len(v))
-        new_item[1][:] = v      # copy inital value
-        self.vec_dict[key] = new_item
-        ret.append( new_item )
-      else:
-        ret.append( self.vec_dict[key] )
-    offset, seg = zip(*ret)
-    return offset, seg
+  def AddVector(self, vector):
+    """ 1. check whether it is a newcomer, use address as hash"""
+    key = ArrayID(vector)
+    if key not in self.vec_dict:
+      """ 2. Make new segment on the tail """
+      new_item = self.MakeVector(len(vector))
+      new_item[1][:] = vector      # copy inital value
+      self.vec_dict[key] = new_item
+      return new_item
+    else:
+      return self.vec_dict[key]
+
+  def FindVector(self, vector):
+    key = ArrayID(vector)
+    return  self.vec_dict.get(key, (None,None))
 
   def OverWriteOrigin(self):
     for dst, (_, src) in self.vec_dict.iteritems():
@@ -380,7 +424,7 @@ def test_CompoundVector():
   vs = np.random.rand(4,4)
   # main function
   cv = CompoundVectorWithDict()
-  offset, seg = cv.AddVector(v for v in vs)
+  offset, seg = zip(*[cv.AddVector(v) for v in vs])
   assert_array_equal(cv.flat, vs.ravel())
   assert_equal(offset, [0,4,8,12])
 
@@ -398,30 +442,63 @@ def test_CompoundVector():
   assert_equal( vs.ravel(), np.hstack( [np.zeros(4), np.ones(4*3) ]) )
 
   # add duplcate vector
-  offset2, _ = cv.AddVector(v for v in vs)
+  offset2, _ = zip(*[cv.AddVector(v) for v in vs])
   assert_equal(offset, offset2)
-  offset3, _ = cv.AddVector( [ np.empty(1) ] )
-  assert offset3[0] == 16
+  offset3, _ = cv.AddVector(  np.empty(1)  )
+  assert offset3 == 16
   print "test_CompoundVector passed"
 
 
 #%% GaussHelmertProblem
+
 class GaussHelmertProblem(object):
-  ConstraintBlock = namedtuple('ConstraintBlock', ['id', 'g_res', 'g_jac'])
+  ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
+  VariableBlock   = namedtuple('VariableBlock'   , ['seg', 'seg_param', 'param'])
+  ObservationBlock= namedtuple('ObservationBlock', ['seg', 'seg_param', 'param', 'mat_w_id'])
 
   def __init__(self):
     self.cv_x   = CompoundVectorWithDict()
     self.cv_l   = CompoundVectorWithDict()
     self.cv_res = CompoundVector()
 
-    self.KKTmat = CompoundMatrix()
-    self.mat_jac_x = SparseBlock()
-    self.mat_jac_l = SparseBlock()
+    self.mat_kkt   = CompoundMatrix()
+    self.mat_w     = SparseBlock(0,1)
+    self.mat_jac_x = SparseBlock(1,0)
+    self.mat_jac_l = SparseBlock(1,1)
 
     self.Jx, self.Jl = None,None
 
     self.constraint_blocks = []    # list of ConstraintBlock
     self.variance_factor = -1.0
+
+    self.dict_variable_block = {}
+    self.dict_observation_block = {}
+
+  def AddParameter(self, x_list):
+    x_off, x_vec = [],[]
+    for x in x_list:
+      offset, seg = self.cv_x.AddVector(x)
+      x_off.append(offset)
+      x_vec.append(seg)
+
+      if not offset in self.dict_variable_block:
+        item = GaussHelmertProblem.VariableBlock(seg, None, None )
+        self.dict_variable_block[offset] = item
+    return x_off, x_vec
+
+  def AddObservation(self, l_list):
+    l_off, l_vec = [],[]
+    for l in l_list:
+      offset, seg = self.cv_l.AddVector(l)
+      l_off.append(offset)
+      l_vec.append(seg)
+
+      if not offset in self.dict_observation_block:
+        dim_l = len(l)
+        mat_w_id = self.mat_w.NewDenseMatrix(offset, offset, (dim_l, dim_l))
+        item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_w_id )
+        self.dict_observation_block[offset] = item
+    return l_off, l_vec
 
   def AddConstraintUsingAD(self, g, x_list, l_list):
     x_sizes = [x.size for x in x_list]
@@ -441,9 +518,10 @@ class GaussHelmertProblem(object):
     dim_res = len(res)
 
     """ 2. Assign poses and mapped vectors for input parameter/observation arrays"""
-    x_off, x_vec = self.cv_x.AddVector(x_list)
-    l_off, l_vec = self.cv_l.AddVector(l_list)
+    x_off, x_vec = self.AddParameter(x_list)
+    l_off, l_vec = self.AddObservation(l_list)
     xl_vec = x_vec + l_vec
+
     """ 3. Compound vector for constraint residual """
     res_off, res_vec = self.cv_res.MakeVector(dim_res)
 
@@ -466,6 +544,27 @@ class GaussHelmertProblem(object):
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
+  def SetSigma(self, array, sigma):
+    if not isinstance(array, list):
+      array = [array]
+    if not isinstance(sigma, list):
+      sigma = [sigma]*len(array)
+    elif len(sigma) != array:
+      raise ValueError("number don't match")
+
+    for ar, si in zip(array, sigma):
+      l_off, _ = self.cv_l.FindVector(ar)
+      if not l_off is None:
+        self.mat_w.PutDenseMatrix( self.dict_observation_block[l_off].mat_w_id, np.diag(si) )
+
+  def SetParameterization(self, array, parameterization):
+    var = VariableBlock(array)
+    if var in self.parameter_dict:
+      self.parameter_dict[var].param = parameterization
+    elif var in self.observation_dict:
+      self.observation_dict[var].param = parameterization
+    else:
+      raise RuntimeWarning("Input variable not in the lists")
 
   def CompoundParameters(self):
     return self.cv_x.flat
@@ -491,6 +590,7 @@ class GaussHelmertProblem(object):
   def MakeJacobians(self):
     self.Jx = self.mat_jac_x.BuildSparseMatrix()
     self.Jl = self.mat_jac_l.BuildSparseMatrix()
+
     return self.Jx, self.Jl
 
   def UpdateResidual(self, ouput=False):
@@ -577,6 +677,9 @@ def test_ProblemJacobian():
   problem.UpdateJacobian()
   assert_array_equal( Jx.todense(), DiagonalRepeat( VerticalRepeat(A, num_l/num_x), num_x) )
   assert_array_equal( Jl.todense(), DiagonalRepeat(B, num_l) )
+
+  # weight
+#  problem.SetSigma()
 
   print "test_ProblemJacobian passed"
 
