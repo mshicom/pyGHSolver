@@ -235,106 +235,70 @@ class MatrixTreeNode(LexicalSortable):
     self.parent = parent
     self.r = r
     self.c = c
-    self._key_r = None
-    self._key_c = None
-    self._global_r = None
-    self._global_c = None
+    self.elements = []
+    self.lexical_key = [(),()]
+    self.absolute_pos = [r, c]
 
-  def isBranch(self):
-    return bool(self.parent)
-
-  @property
-  def row(self):
-    if self._global_r is None:
-      self._global_r = self.r
-
-      if self.isBranch():
-        self._global_r += self.parent.row
-    return self._global_r
-
-  @property
-  def col(self):
-    if self._global_c is None:
-      self._global_c = self.c
-      if self.isBranch():
-        self._global_c += self.parent.col
-
-    return self._global_c
-
-  @property
-  def key_r(self):
-    if self._key_r is None:
-      if self.isBranch():
-        self._key_r = (self.r,) + self.parent.key_r
-      else:
-        self._key_r = ()
-    return self._key_r
-
-  @property
-  def key_c(self):
-    if self._key_c is None:
-      if self.isBranch():
-        self._key_c = (self.c,) + self.parent.key_c
-      else:
-        self._key_c = ()
-    return self._key_c
-
-  def key(self):
-      return self.key_r + self.key_c
-
-  def __iter__(self):
-    yield self
-    if hasattr(self, 'elements'):
-      for child in self.elements:
-       for c in child.__iter__():
-         yield c
-
-  def leaves(self):
-    if hasattr(self, 'elements'):
-      for child in self.elements:
-       for c in child.leaves():
-         yield c
-    else:
-      yield self
-
-  def __repr__(self):
-    return str(type(self)) + "at (%d, %d)" % (self.r, self.c)
-
-class CompoundMatrix(MatrixTreeNode):
-  def __init__(self, r=0, c=0):
-    super(CompoundMatrix, self).__init__(None, r, c)
-    self.elements = [ ]
-    self.shape = None
-
-  def AddSparseBlock(self, block):
-    block.parent = self
-    self.elements.append( block )
-
-class SparseBlock(MatrixTreeNode):
-  def __init__(self, r=0, c=0, parent=None):
-    super(SparseBlock, self).__init__(parent, r, c)
-    self.elements = [ ]
-    self.shape = None
-
-  def AddDenseMatrix(self, r, c, shape):
+  def AddElement(self, e):
+    e.parent = self
     id = len(self.elements)
-    self.elements.append( DenseMatrix(self, r, c, shape) )
+    self.elements.append( e )
     return id
 
-  def ComputeShape(self):
-    bottom_mat = max(self.elements, key=lambda o : o.r + o.dim_vec)
-    right_mat  = max(self.elements, key=lambda o : o.c + o.num_vec)
-    r = bottom_mat.r + bottom_mat.dim_vec
-    c = right_mat.c  + right_mat.num_vec
-    return r, c
+  def key(self):
+    """ Provide key for sorting algorithm,
+        in lexical order: (c_root,..,c_leaves), (r_root,..,r_leaves)
+        this is exactly the order of column-major matrix
+    """
+    return self.lexical_key[1] + self.lexical_key[0]
 
-  def PutDenseMatrix(self, id, src):
-    self.elements[id].Write( src )
+  def __call__(self, type):
+    """ Collect specific type node of the tree
+        type : SparseBlock / DenseMatrix / DenseMatrixSegment
+    """
+    if isinstance(self, type):  # ignore all the other nodes except the specific type
+        yield self
+    for child in self.elements:
+      if isinstance(child, type):  # ignore all the other nodes except the specific type
+        yield child
+      else:
+        for c in child.__call__(type):
+          yield c
+
+  def PropogateAbsolutePos(self, offset=[0,0]):
+    self.absolute_pos[0] = offset[0] + self.r
+    self.absolute_pos[1] = offset[1] + self.c
+    for e in self.elements:
+      e.PropogateAbsolutePos(self.absolute_pos)
+
+  def PropogateKeyPrefix(self, prefix=[(),()] ): # empty prefix for root
+    self.lexical_key[0] = prefix[0] + (self.r,)
+    self.lexical_key[1] = prefix[1] + (self.c,)
+    for e in self.elements:
+      e.PropogateKeyPrefix(self.lexical_key)
+
+  def __repr__(self):
+    return str(type(self)) + "at (%d, %d)" % self.absolute_pos
+
+#  def ComputeShape(self):
+#    self.PropogateKeyPrefix()
+#
+#    mats = list(self(DenseMatrix))
+#    right_mat  = max(mats, key=lambda m: m.lexical_key[0])
+#    bottom_mat = max(mats, key=lambda m: m.lexical_key[1])
+#
+#    bottom_mat = max(mats, key=lambda m : m.absolute_pos[0] + m.dim_vec)
+#    right_mat  = max(mats, key=lambda m : m.absolute_pos[1] + m.num_vec)
+#    r = bottom_mat.r + bottom_mat.dim_vec
+#    c = right_mat.c  + right_mat.num_vec
+#    return r, c
 
   def BuildSparseMatrix(self, coo=False):
+    self.PropogateKeyPrefix()
+
     """ 1. lexical sort of all the DenseMatrixSegment,(i.e leaves of the tree),
     the resulting order is exactly the linear data term is CSC matrix """
-    vectors = sorted(self.leaves())
+    vectors = sorted(self(DenseMatrixSegment))
 
     """ 2. assign segments to the compound data vector   """
     len_list = [vec.length for vec in vectors]
@@ -343,9 +307,13 @@ class SparseBlock(MatrixTreeNode):
     data = np.empty(nnz)
     for start, vec in zip(offset.tolist(), vectors):
       vec.Mapto(data, start)  # vec.data = data[start : start + vec.length]
+    self.data = data
+    self.nnz  = nnz
 
     """ 3. Make row and col indices for COO matrix.
         Since the mapping is done, we could use it to collect indivial indice """
+    self.PropogateAbsolutePos()
+
     for vec in vectors:
       vec._feed_row_indice()
     row = data.astype('i').copy()
@@ -354,12 +322,12 @@ class SparseBlock(MatrixTreeNode):
       vec._feed_col_indice()
     col = data.astype('i').copy()
 
-    """ update shape info"""
-    shape = (row.max()+1, col[-1]+1)
-    if self.shape is None:
-      self.shape = shape
-    else:
-      self.shape = tuple(np.max([shape, self.shape], axis=0))
+#    """ update shape info"""
+#    shape = (row.max()+1, col[-1]+1)
+#    if self.shape is None:
+#      self.shape = shape
+#    else:
+#      self.shape = tuple(np.max([shape, self.shape], axis=0))
 
     """ 5. convert to Compressed Sparse Column (CSC)
     * compressed(col) -> indices, where only the heads of each col are recorded
@@ -375,12 +343,35 @@ class SparseBlock(MatrixTreeNode):
     else:
       return scipy.sparse.coo_matrix( (data, (row, col) ))#, shape=self.shape
 
+class CompoundMatrix(MatrixTreeNode):
+  def __init__(self):
+    super(CompoundMatrix, self).__init__(None, 0, 0)
+    self.shape = None
+
+  def NewSparseBlock(self, r, c):
+    sb = SparseBlock(r, c)
+    return self.AddElement(sb)
+
+class SparseBlock(MatrixTreeNode):
+  def __init__(self, r=0, c=0):
+    super(SparseBlock, self).__init__(None, r, c)
+    self.shape = None
+
+  def NewDenseMatrix(self, r, c, shape):
+    dm = DenseMatrix(r, c, shape)
+    return self.AddElement(dm)
+
+  def PutDenseMatrix(self, id, src):
+    self.elements[id].Write( src )
+
 class DenseMatrix(MatrixTreeNode):
-  def __init__(self, parent, r, c, shape):
-    super(DenseMatrix, self).__init__(parent, r, c)
+  def __init__(self, r, c, shape):
+    super(DenseMatrix, self).__init__(None, r, c)
 
     self.dim_vec, self.num_vec = shape[:2]
-    self.elements = [ DenseMatrixSegment(self, seq, self.dim_vec) for seq in xrange(self.num_vec) ]
+    for seq in xrange(self.num_vec):
+      self.AddElement(DenseMatrixSegment(self, seq, self.dim_vec))
+
     self.buf = np.empty((self.dim_vec, self.num_vec), order='F').T
 
   def Write(self, array):
@@ -403,58 +394,97 @@ class DenseMatrixSegment(MatrixTreeNode):
     self.length = length
     self.data = None
 
+  def isLeaf(self):
+    return True
+
   def Mapto(self, vector, start):
     self.data = np.ndarray(shape  = (self.length,),
                            buffer = vector,
                            offset = start*vector.itemsize)
+
   def _feed_row_indice(self):
-    r0 = self.row
+    r0 = self.absolute_pos[0]
     r1 = r0 + self.length
     self.data[:] = np.arange(r0,r1)
 
   def _feed_col_indice(self):
-    self.data[:] = self.col # all the data share the same column
+    self.data[:] = self.absolute_pos[1] # all the data share the same column
 
   def __repr__(self):
     return str(self.key()) + " len:" + str(self.length)
 
-def test_SparseBlock():
-  dense  = np.empty((4,3))
-  sb = SparseBlock()
-  sb.AddDenseMatrix( 0, 0, (4,3) )
-  sparse = sb.BuildSparseMatrix()
-  assert sparse.shape == dense.shape
+  def BuildSparseMatrix(self):
+    raise RuntimeError("BuildSparseMatrix not supported in DenseMatrixSegment level")
 
-  # write function
-  dense1  = np.arange(12).reshape(4,3)
-  sb = SparseBlock()
-  sb.AddDenseMatrix( 0, 0, (4,3) )
-  sparse = sb.BuildSparseMatrix()
-  sb.PutDenseMatrix(0, dense1)
-  assert_array_equal( sparse.A, dense1 )
+  def ComputeShape(self):
+    return (self.length,)
 
-  # multiple matrix
-  e = [np.ones(1), 2*np.eye(2), 3*np.eye(3)]
-  dense  = scipy.linalg.block_diag(*e)
-  sb = SparseBlock()
-  sb.AddDenseMatrix( 0, 0, (1,1) )
-  sb.AddDenseMatrix( 1, 1, (2,2) )
-  sb.AddDenseMatrix( 3, 3, (3,3) )
-  sparse = sb.BuildSparseMatrix()
-  for i in range(3):
-    sb.PutDenseMatrix(i, e[i])
-  assert_array_equal( sparse.A, dense  )
 
-  sb = [SparseBlock(0,0), SparseBlock(0,4)]
-  sb[0].AddDenseMatrix( 0, 0, (4,3) )
-  sb[1].AddDenseMatrix( 0, 0, (4,3) )
+
+def test_MatrixTreeNode():
+
+  sb = SparseBlock()
+  sb.NewDenseMatrix( 0, 0, (4,3) )
+  sb.NewDenseMatrix( 0, 3, (2,3) )
+
+  # iterator
+  assert len(list(sb(SparseBlock))) == 1
+  assert len(list(sb(DenseMatrix))) == 2
+  assert len(list(sb(DenseMatrixSegment))) == 6
+
+  # PropogateKeyPrefix
+  sb.PropogateKeyPrefix()
+  assert_equal([s.key() for s in sb(DenseMatrixSegment)],
+               [(0, 0, 0, 0, 0, 0),
+                (0, 0, 1, 0, 0, 0),
+                (0, 0, 2, 0, 0, 0),
+                (0, 3, 0, 0, 0, 0),
+                (0, 3, 1, 0, 0, 0),
+                (0, 3, 2, 0, 0, 0)] )
+
+  # PropogateAbsolutePos
+  sb.PropogateAbsolutePos()
+  assert_equal(
+    [s.absolute_pos for s in sb(DenseMatrixSegment)],
+    [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]])
+
+  sb.PropogateAbsolutePos([1,2])
+  assert_equal(
+    [s.absolute_pos for s in sb(DenseMatrixSegment)],
+    [[1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [1, 7]])
+
+  # BuildSparseMatrix
+  sbm = sb.BuildSparseMatrix()
+  sb.data[:] = np.arange(sb.nnz)
+  assert_array_equal(sbm.A,
+                    [[  0.,   4.,   8.,  12.,  14.,  16.],
+                     [  1.,   5.,   9.,  13.,  15.,  17.],
+                     [  2.,   6.,  10.,   0.,   0.,   0.],
+                     [  3.,   7.,  11.,   0.,   0.,   0.]])
+
+  # CompoundMatrix
   cm = CompoundMatrix()
-  cm.AddSparseBlock(sb[0])
-  cm.AddSparseBlock(sb[1])
+  sb2 = SparseBlock()
+  sb2.NewDenseMatrix( 4, 6, (3,3) )
 
-  print "test_CreateSparseMatrix passed"
+  cm.AddElement(sb)
+  cm.AddElement(sb2)
+  assert_equal( len(list(cm(SparseBlock))), 2)
+  assert_equal( len(list(cm(DenseMatrix))), 3)
+  assert_equal( len(list(cm(DenseMatrixSegment))), 9)
 
-test_SparseBlock()
+  cbm = cm.BuildSparseMatrix()
+  cm.data[:] = np.arange(cm.nnz)
+  assert_array_equal(cbm.A,
+                    [[  0.,   4.,   8.,  12.,  14.,  16.,   0.,   0.,   0.],
+                     [  1.,   5.,   9.,  13.,  15.,  17.,   0.,   0.,   0.],
+                     [  2.,   6.,  10.,   0.,   0.,   0.,   0.,   0.,   0.],
+                     [  3.,   7.,  11.,   0.,   0.,   0.,   0.,   0.,   0.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  18.,  21.,  24.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  19.,  22.,  25.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  20.,  23.,  26.]])
+
+test_MatrixTreeNode()
 #%% CompoundVector
 class ArrayID(object):
   __slots__ = 'addr','data'
