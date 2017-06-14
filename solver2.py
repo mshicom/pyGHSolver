@@ -17,6 +17,7 @@ from itertools import chain
 from parameterization import *
 import pycppad
 from pykrylov.linop import *
+from pykrylov.minres import Minres
 
 #%% ColumnMajorSparseMatrix
 class LexicalSortable(object):
@@ -106,7 +107,7 @@ class MatrixTreeNode(LexicalSortable):
     self.PropogateAbsolutePos()
     row = np.hstack(vec.row_indice() for vec in vectors)
     col = np.hstack(vec.col_indice() for vec in vectors)
-
+    self.row, self.col = row, col
 
     """ 5. convert to Compressed Sparse Column (CSC)
     * compressed(col) -> indices, where only the heads of each col are recorded,
@@ -243,8 +244,8 @@ class DenseMatrixSegment(MatrixTreeNode):
     self.data = None
 
   def Mapto(self, vector, start):
-    if not self.data is None:
-      raise UserWarning("Segments being remapped")
+#    if not self.data is None:
+#      raise UserWarning("Segments being remapped")
     self.data = np.ndarray(shape  = (self.length,),
                            buffer = vector,
                            offset = start*vector.itemsize)
@@ -568,7 +569,60 @@ class GaussHelmertProblem(object):
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
-  def SetSigma(self, array, sigma):
+  def AddConstraintWithKnownBlocks(self, g, x_off, l_off):
+    x_vec,l_vec,x_sizes,l_sizes = [],[],[],[]
+    for x in x_off:
+      block = self.dict_variable_block.get(x, None)
+      if block is None:
+        raise RuntimeError("wrong id")
+      x_vec.append(block.seg)
+      x_sizes.append(len(block.seg))
+
+    for l in l_off:
+      block = self.dict_observation_block.get(l, None)
+      if block is None:
+        raise RuntimeError("wrong id")
+      l_vec.append(block.seg)
+      l_sizes.append(len(block.seg))
+
+    xl_vec = x_vec + l_vec
+
+    xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
+    """ 1. Generate Jacobian function by cppad """
+    var       = np.hstack( xl_vec )
+    var_ad    = pycppad.independent( var )
+    var_jacobian= pycppad.adfun(var_ad, g( *np.split(var_ad, xl_indices) ) ).jacobian
+
+    res = g( *xl_vec )
+    jac = var_jacobian(var)
+    if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
+      RuntimeWarning("AutoDiff Not valid")
+      return
+    dim_res = len(res)
+
+    """ 3. Compound vector for constraint residual """
+    res_off, res_vec = self.cv_res.MakeVector(dim_res)
+
+    jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
+    jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
+
+    """ 4. Generate constraint functor that use the mapped vectors """
+    def g_res():
+      res_vec[:] = g(*xl_vec)
+
+    def g_jac():
+      J = var_jacobian( np.hstack(xl_vec) )
+      jac = np.split(J, xl_indices, axis=1)
+      jac.reverse() # reversed, to pop(-1) instead of pop(0)
+      for submat_id in jac_submat_id_x:
+        self.mat_jac_x.PutDenseMatrix( submat_id, jac.pop() )
+
+      for submat_id in jac_submat_id_l:
+        self.mat_jac_l.PutDenseMatrix( submat_id, jac.pop() )
+
+    self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
+
+  def SetSigma(self, array, sigma, isInv=False):
     if not isinstance(array, list):
       array = [array]
     if not isinstance(sigma, list):
@@ -577,9 +631,13 @@ class GaussHelmertProblem(object):
       raise ValueError("number don't match")
 
     for ar, si in zip(array, sigma):
-      l_off, _ = self.cv_l.FindVector(ar)
+      if np.isscalar(ar):
+        l_off = ar
+      else:
+        l_off, _ = self.cv_l.FindVector(ar)
       if not l_off is None:
-        self.mat_w.PutDenseMatrixInCache( self.dict_observation_block[l_off].mat_w_id, 1./si )
+        w = si if isInv else 1./si
+        self.mat_w.PutDenseMatrixInCache( self.dict_observation_block[l_off].mat_w_id, w)
 
   def SetParameterization(self, array, parameterization):
     var = VariableBlock(array)
@@ -611,6 +669,10 @@ class GaussHelmertProblem(object):
   def dim_res(self):
     return self.cv_res.tail
 
+  @property
+  def dims(self):
+    return [self.dim_x, self.dim_l, self.dim_res ]
+
   def MakeJacobians(self):
     self.Jx = self.mat_jac_x.BuildSparseMatrix()
     self.Jl = self.mat_jac_l.BuildSparseMatrix()
@@ -631,6 +693,13 @@ class GaussHelmertProblem(object):
 
     kkt = self.mat_kkt.BuildSparseMatrix((dim_total,dim_total))
     return kkt
+
+  def MakeKKTSegmentSlice(self):
+    offset =  np.cumsum([0]+self.dims)
+    segment_x = slice(offset[0], offset[1])
+    segment_l = slice(offset[1], offset[2])
+    segment_r = slice(offset[2], offset[3])
+    return [segment_x, segment_l, segment_r ]
 
   def UpdateResidual(self, ouput=False):
     for cb in self.constraint_blocks:
@@ -723,6 +792,16 @@ def test_ProblemJacobian():
   W = problem.MakeWeightMatrix()
   assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
 
+  # 2 method
+  problem = GaussHelmertProblem()
+  for i in range(num_x):
+    for j in range(num_l/num_x):
+      x_off, _ = problem.AddParameter( [ x[i] ] )
+      l_off, _ = problem.AddObservation( [ l[i][j] ] )
+
+      problem.AddConstraintWithKnownBlocks(AffineConstraint, x_off, l_off)
+      problem.SetSigma(l_off, sigma)
+
   print "test_ProblemJacobian passed"
 
 
@@ -743,8 +822,8 @@ if __name__ == '__main__':
   B = np.random.rand(dim_g, dim_l)
   AffineConstraint = MakeAffineConstraint(A,B)
 
-  x = np.empty((num_x, dim_x))
-  l = [ np.empty((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+  x = np.ones((num_x, dim_x))
+  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
 
   problem = GaussHelmertProblem()
   for i in range(num_x):
@@ -752,12 +831,38 @@ if __name__ == '__main__':
       problem.AddConstraintUsingAD(AffineConstraint,
                                    [ x[i] ],
                                    [ l[i][j] ])
-  res = problem.CompoundResidual()
-  xc = problem.CompoundParameters()
-  lc = problem.CompoundObservation()
-  kkt = problem.MakeKKTMatrix()
-  a = kkt.A
+  dims = problem.dims
+  total_dim = sum(dims)
+  res  = problem.CompoundResidual()
+  xc   = problem.CompoundParameters()
+  lc   = problem.CompoundObservation()
+  l0   = lc.copy()
+  W    = problem.MakeWeightMatrix()
+  kkt  = problem.MakeKKTMatrix()
+  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
+#  a = kkt.A
   problem.UpdateJacobian()
-  op = CholeskyOperator(kkt)
+#  op = CholeskyOperator(kkt)
+  op = CoordLinearOperator(problem.mat_kkt.data,
+                           problem.mat_kkt.row,
+                           problem.mat_kkt.col,
+                           total_dim, total_dim,
+                           symmetric=True)
+  b = np.zeros(sum(dims))
+  solver = Minres(op)
+  for it in range(1):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+#    op.UpdataFactor(kkt)
+
+    e = lc - l0
+    b[segment_l] = -e
+    b[segment_r] = -res
+    solver.solve(b)
+    s = solver.bestSolution
+
+    xc += s[segment_x]
+    lc += s[segment_l]
+    print np.linalg.norm(res), np.linalg.norm(e)
 
 
