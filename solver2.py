@@ -10,7 +10,7 @@ import scipy
 import scipy.sparse
 
 from collections import namedtuple
-np.set_printoptions(precision=4, linewidth=80)
+np.set_printoptions(precision=4, linewidth=120)
 from numpy.testing import *
 from itertools import chain
 
@@ -34,7 +34,7 @@ class MatrixTreeNode(LexicalSortable):
     self.c = c
     self.elements = []
     self.lexical_key = [(),()]
-    self.absolute_pos = None
+    self.absolute_pos = np.r_[r,c]
 
   def AddElement(self, e):
     e.parent = self
@@ -79,9 +79,9 @@ class MatrixTreeNode(LexicalSortable):
       e.PropogateKeyPrefix(child_key)
 
   def __repr__(self):
-    return str(type(self)) + "at (%d, %d)" % self.absolute_pos
+    return str(type(self)) + "at (%d, %d)" % self.absolute_pos.tolist()
 
-  def BuildSparseMatrix(self, shape=None, coo=False):
+  def BuildSparseMatrix(self, shape=None, coo=True):
     self.PropogateKeyPrefix()
 
     """ 1. lexical sort of all the DenseMatrixSegment,(i.e leaves of the tree),
@@ -100,7 +100,7 @@ class MatrixTreeNode(LexicalSortable):
     self.nnz  = nnz
 
     """ 3. Write cached data """
-    for m in self(CachedMatrix):
+    for m in self(DenseMatrix):
       m.Flush()
 
     """ 4. Make row and col indices for COO matrix """
@@ -156,45 +156,39 @@ class SparseBlock(MatrixTreeNode):
   def PutDenseMatrix(self, id, src):
     self.elements[id].Write( src )
 
-  def PutDenseMatrixInCache(self, id, src):
-    self.elements[id].WriteCache( src )
-
   def OverwriteRC(self, r, c):
     self.r = r
     self.c = c
 
-class CachedMatrix(object):
-  def __init__(self):
+
+class DenseMatrix(MatrixTreeNode):
+  def __init__(self, r, c, shape):
+    super(DenseMatrix, self).__init__(None, r, c)
+
     self.cache = None
+    self.post_callback = []
+    self.shape = shape
+    self._init_element()
 
-  def Write(array):
-    raise NotImplementedError()
+  def _init_element(self):
+    for seq in xrange(self.shape[1]):
+      self.AddElement(DenseMatrixSegment(self, 0, seq, self.shape[0]))
 
-  def WriteCache(self, array):
-    self.cache = array.copy()
+    self.buf = np.empty(self.shape, order='F').T
+
+  def Write(self, array):
+    if self.elements[0].data is None:
+      self.cache = array.copy()
+    else:
+      for dst, src in zip(self.elements, array.T):
+        dst.data[:] = src
+    for cb in self.post_callback:
+      cb(self, array)
 
   def Flush(self):
     if self.cache is None:
       return
-
     self.Write(self.cache)
-
-class DenseMatrix(MatrixTreeNode, CachedMatrix):
-  def __init__(self, r, c, shape):
-    super(DenseMatrix, self).__init__(None, r, c)
-    CachedMatrix.__init__(self)
-
-    self.dim_vec, self.num_vec = shape[:2]
-    for seq in xrange(self.num_vec):
-      self.AddElement(DenseMatrixSegment(self, 0, seq, self.dim_vec))
-
-    self.buf = np.empty((self.dim_vec, self.num_vec), order='F').T
-
-  def Write(self, array):
-    if self.elements[0].data is None:
-      raise RuntimeError("slice not assigned yet")
-    for dst, src in zip(self.elements, array.T):
-      dst.data[:] = src
 
   @property
   def data(self):
@@ -204,37 +198,27 @@ class DenseMatrix(MatrixTreeNode, CachedMatrix):
       dst[:] = src.data[:]
     return self.buf.T
 
+  def ComputeShape(self):
+    return self.shape
+
   def __repr__(self):
-      return "DenseMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
+      return "DenseMatrix(%d, %d)" % (self.r, self.c)
 
-class DiagonalMatrix(MatrixTreeNode, CachedMatrix):
+class DiagonalMatrix(DenseMatrix):  # inherit from DenseMatrix, so that the gathering mechansim will see it the same as normal DenseMatrix
   def __init__(self, r, c, dim):
-    super(DiagonalMatrix, self).__init__(None, r, c)
-    CachedMatrix.__init__(self)
+    super(DiagonalMatrix, self).__init__(r, c, (dim, dim))
 
-    self.dim = dim
-    for seq in xrange(dim):
+  def _init_element(self):
+    for seq in xrange(self.shape[0]):
       self.AddElement(DenseMatrixSegment(self, seq, seq, 1))
-
-    self.buf = np.empty(dim)
+    self.buf = np.empty((self.shape[0],1))
 
   def Write(self, array):
-    if self.elements[0].data is None:
-      raise RuntimeError("slice not assigned yet")
-    for dst, src in zip(self.elements, array.tolist()):
-      dst.data[:] = src
-
-  @property
-  def data(self):
-    if self.elements[0].data is None:
-      return None
-
-    for i, src in enumerate(self.elements):
-      self.buf[i] = src.data[:]
-    return self.buf
+    super(DiagonalMatrix, self).Write(array.reshape(1, -1))
 
   def __repr__(self):
-      return "DiagonalMatrix at (%d, %d): \n" % (self.r, self.c)  + str(self.data)
+      return "DiagonalMatrix(%d, %d)" % (self.r, self.c)
+
 
 
 class DenseMatrixSegment(MatrixTreeNode):
@@ -244,8 +228,6 @@ class DenseMatrixSegment(MatrixTreeNode):
     self.data = None
 
   def Mapto(self, vector, start):
-#    if not self.data is None:
-#      raise UserWarning("Segments being remapped")
     self.data = np.ndarray(shape  = (self.length,),
                            buffer = vector,
                            offset = start*vector.itemsize)
@@ -353,8 +335,8 @@ def test_MatrixTreeNode():
   sb = SparseBlock()
   id1 = sb.NewDenseMatrix(0,0,(2,2))
   id2 = sb.NewDiagonalMatrix(2,2,4)
-  sb.PutDenseMatrixInCache(id1, np.full((2,2), -1))
-  sb.PutDenseMatrixInCache(id2, np.full(4, 2))
+  sb.PutDenseMatrix(id1, np.full((2,2), -1))
+  sb.PutDenseMatrix(id2, np.full(4, 2))
 
   sbm = sb.BuildSparseMatrix()
   assert_array_equal(sbm.A,
@@ -393,7 +375,7 @@ def test_ArrayID():
   print "test_ArrayID passed"
 
 class CompoundVector(object):
-  def __init__(self, capacity=10000):
+  def __init__(self, capacity=100000):
     self.buff = np.empty(capacity)
     self.tail = 0
 
@@ -411,7 +393,7 @@ class CompoundVector(object):
     return np.ndarray((self.tail,), buffer=self.buff)
 
 class CompoundVectorWithDict(CompoundVector):
-  def __init__(self, cap = 10000):
+  def __init__(self, cap = 100000):
     self.vec_dict = {}
     super(CompoundVectorWithDict, self).__init__(cap)
 
@@ -519,7 +501,7 @@ class GaussHelmertProblem(object):
       if not offset in self.dict_observation_block:
         dim_l = len(l)
         mat_w_id = self.mat_w.NewDiagonalMatrix(offset, offset, dim_l)
-        self.mat_w.PutDenseMatrixInCache(mat_w_id, np.ones(dim_l))
+        self.mat_w.PutDenseMatrix(mat_w_id, np.ones(dim_l))
 
         item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_w_id )
         self.dict_observation_block[offset] = item
@@ -637,7 +619,7 @@ class GaussHelmertProblem(object):
         l_off, _ = self.cv_l.FindVector(ar)
       if not l_off is None:
         w = si if isInv else 1./si
-        self.mat_w.PutDenseMatrixInCache( self.dict_observation_block[l_off].mat_w_id, w)
+        self.mat_w.PutDenseMatrix( self.dict_observation_block[l_off].mat_w_id, w)
 
   def SetParameterization(self, array, parameterization):
     var = VariableBlock(array)
@@ -715,6 +697,32 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
+def SolverByGaussElimination(problem, maxit=10):
+  res  = problem.CompoundResidual()
+  xc   = problem.CompoundParameters()
+  lc   = problem.CompoundObservation()
+  l0   = lc.copy()
+
+  Sigma= problem.MakeWeightMatrix()
+  Sigma.data[:] = 1./Sigma.data
+  W    = problem.MakeWeightMatrix()
+  Ja,Jb= problem.MakeJacobians()
+
+  for it in range(maxit):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+    le  = lc - l0
+    print np.linalg.norm(res), np.linalg.norm(le)
+
+    cg  = le - res
+    ATW = Ja.T * W
+    ATWA= ATW * Ja
+    dx  = scipy.sparse.linalg.spsolve(ATWA, ATW * cg)
+    lag = W * (Ja * dx - cg)
+    dl  = Sigma * lag  + le
+    lc -= dl
+    xc += dx
+  return xc, lc - l0
 #%%
 def EqualityConstraint(a,b):
   return a-b
@@ -809,6 +817,7 @@ def test_ProblemJacobian():
 if __name__ == '__main__':
 
   test_MatrixTreeNode()
+  test_MakeAAT()
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
@@ -849,7 +858,6 @@ if __name__ == '__main__':
                            total_dim, total_dim,
                            symmetric=True)
   b = np.zeros(sum(dims))
-  solver = Minres(op)
   for it in range(1):
     problem.UpdateJacobian()
     problem.UpdateResidual()
@@ -858,11 +866,9 @@ if __name__ == '__main__':
     e = lc - l0
     b[segment_l] = -e
     b[segment_r] = -res
-    solver.solve(b)
-    s = solver.bestSolution
 
-    xc += s[segment_x]
-    lc += s[segment_l]
+#    xc += s[segment_x]
+#    lc += s[segment_l]
     print np.linalg.norm(res), np.linalg.norm(e)
 
 
