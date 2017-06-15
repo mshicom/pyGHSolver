@@ -79,7 +79,7 @@ class MatrixTreeNode(LexicalSortable):
       e.PropogateKeyPrefix(child_key)
 
   def __repr__(self):
-    return str(type(self)) + "at (%d, %d)" % self.absolute_pos.tolist()
+    return str(type(self)) + "at (%d, %d)" % (self.absolute_pos[0],self.absolute_pos[1])
 
   def BuildSparseMatrix(self, shape=None, coo=True):
     self.PropogateKeyPrefix()
@@ -349,6 +349,48 @@ def test_MatrixTreeNode():
   print "test_MatrixTreeNode passed"
 
 #%%
+def _make_tranpose_callback(dst_block):
+  def WriteTranspose(obj, array):
+    dst_block.Write(array.T)
+  return WriteTranspose
+
+def MakeSymmetric(other, r=0, c=0):
+  """ 1. collect dense matrix"""
+  other.PropogateAbsolutePos()
+  dmat = list(other(DenseMatrix))
+
+  """ """
+  for dm in dmat:
+    r,c = dm.absolute_pos[0], dm.absolute_pos[1]
+    if r!=c: # only mirror off diagonal matrix
+      dm_t = DenseMatrix(c, r, tuple(reversed(dm.shape)))
+      dm.post_callback.append( _make_tranpose_callback(dm_t) )
+      other.AddElement(dm_t)
+    else:
+      assert dm.shape[0] == dm.shape[1]
+  return other
+
+def test_MakeSymmetric():
+  # main function
+  sb = SparseBlock()
+  id1 = sb.NewDenseMatrix( 0, 0, (2,2) )
+  id2 = sb.NewDenseMatrix( 2, 0, (1,2) )
+
+  MakeSymmetric(sb)
+  sb.PutDenseMatrix(id1, np.full((2,2), 1.) )
+  sb.PutDenseMatrix(id2, np.full((1,2), 2.) )
+  sp = sb.BuildSparseMatrix()
+  assert_array_equal(sp.A,
+                    [[ 1.,  1.,  2.],
+                     [ 1.,  1.,  2.],
+                     [ 2.,  2.,  0.]])
+  # auto update
+  sb.PutDenseMatrix(id2, np.full((1,2), 0.) )
+  assert_array_equal(sp.A,
+                    [[ 1.,  1.,  0.],
+                     [ 1.,  1.,  0.],
+                     [ 0.,  0.,  0.]])
+#%%
 from collections import defaultdict,OrderedDict
 def _make_AAT_callback(dst_block, dst_block_shape, src_dm_list):
   op_a = {dm : None for dm in src_dm_list}
@@ -396,7 +438,7 @@ def _make_ABT_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b)
 #          op[key] = None
   return CalculateSumOfABT
 
-def MakeAAT(other, r=0, c=0):
+def MakeAAT(other, make_full=True, r=0, c=0):
   ret = SparseBlock(r, c)
 
   """ 1. collect dense matrix"""
@@ -448,7 +490,7 @@ def MakeAAT(other, r=0, c=0):
 
       for dm in dm_a+dm_b:
         dm.post_callback.append(callback)
-  return ret
+  return MakeSymmetric(ret) if make_full else ret
 
 def test_MakeAAT():
   sb = SparseBlock()
@@ -466,16 +508,16 @@ def test_MakeAAT():
   # upper triangular of sp_a*sp_a.T,
   assert_array_equal(sp_aat.A,
                     [[ 14.,  18.,  18.,  18.],
-                     [  0.,  27.,  27.,  27.],
-                     [  0.,  27.,  27.,  27.],
-                     [  0.,  27.,  27.,  27.]])
+                     [ 18.,  27.,  27.,  27.],
+                     [ 18.,  27.,  27.,  27.],
+                     [ 18.,  27.,  27.,  27.]])
   # auto update
   sb.PutDenseMatrix(id2, np.full((1,3), 4.) )
   assert_array_equal(sp_aat.A,
                     [[ 50.,  36.,  36.,  36.],
-                     [  0.,  27.,  27.,  27.],
-                     [  0.,  27.,  27.,  27.],
-                     [  0.,  27.,  27.,  27.]])
+                     [ 36.,  27.,  27.,  27.],
+                     [ 36.,  27.,  27.,  27.],
+                     [ 36.,  27.,  27.,  27.]])
 
 
 #%% CompoundVector
@@ -947,6 +989,7 @@ def test_ProblemJacobian():
 if __name__ == '__main__':
 
   test_MatrixTreeNode()
+  test_MakeSymmetric()
   test_MakeAAT()
   test_ArrayID()
   test_CompoundVector()
@@ -979,26 +1022,26 @@ if __name__ == '__main__':
   W    = problem.MakeWeightMatrix()
   kkt  = problem.MakeKKTMatrix()
   segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
-#  a = kkt.A
-  problem.UpdateJacobian()
-#  op = CholeskyOperator(kkt)
-  op = CoordLinearOperator(problem.mat_kkt.data,
-                           problem.mat_kkt.row,
-                           problem.mat_kkt.col,
-                           total_dim, total_dim,
-                           symmetric=True)
-  b = np.zeros(sum(dims))
-  for it in range(1):
-    problem.UpdateJacobian()
-    problem.UpdateResidual()
-#    op.UpdataFactor(kkt)
-
-    e = lc - l0
-    b[segment_l] = -e
-    b[segment_r] = -res
-
-#    xc += s[segment_x]
-#    lc += s[segment_l]
-    print np.linalg.norm(res), np.linalg.norm(e)
+##  a = kkt.A
+#  problem.UpdateJacobian()
+##  op = CholeskyOperator(kkt)
+#  op = CoordLinearOperator(problem.mat_kkt.data,
+#                           problem.mat_kkt.row,
+#                           problem.mat_kkt.col,
+#                           total_dim, total_dim,
+#                           symmetric=True)
+#  b = np.zeros(sum(dims))
+#  for it in range(1):
+#    problem.UpdateJacobian()
+#    problem.UpdateResidual()
+##    op.UpdataFactor(kkt)
+#
+#    e = lc - l0
+#    b[segment_l] = -e
+#    b[segment_r] = -res
+#
+##    xc += s[segment_x]
+##    lc += s[segment_l]
+#    print np.linalg.norm(res), np.linalg.norm(e)
 
 
