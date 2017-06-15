@@ -348,6 +348,136 @@ def test_MatrixTreeNode():
                      [ 0.,  0.,  0.,  0.,  0.,  2.]])
   print "test_MatrixTreeNode passed"
 
+#%%
+from collections import defaultdict,OrderedDict
+def _make_AAT_callback(dst_block, dst_block_shape, src_dm_list):
+  op_a = {dm : None for dm in src_dm_list}
+  def CalculateSumOfAAT(obj, array):
+    # 1. record the incoming data
+    if obj in op_a:
+      op_a[obj] = array
+    else:
+      raise RuntimeError("called by wrong object")
+    # 2. do calculation once all data are ready
+    if not np.any( [op is None for op in op_a.values()] ): # None in op_a.values():
+      new_data = np.zeros(dst_block_shape)
+      for mat in op_a.values():
+        new_data += mat.dot(mat.T)
+      dst_block.Write( new_data )
+      # 3. reset the dict to all None
+#      for key in op_a.keys():
+#          op_a[key] = None
+
+  return CalculateSumOfAAT
+
+def _make_ABT_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b):
+  op_a, op_b = OrderedDict(), OrderedDict()
+  for dm_a_, dm_b_ in zip(src_dm_list_a, src_dm_list_b):
+    op_a[dm_a_] = None
+    op_b[dm_b_] = None
+
+  def CalculateSumOfABT(obj, array):
+    # 1. record the incoming data
+    if obj in op_a:
+      op_a[obj] = array
+    elif obj in op_b:
+      op_b[obj] = array
+    else:
+      raise RuntimeError("called by wrong object")
+    # 2. do calculation once all data are ready
+    if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
+      new_data = np.zeros(dst_block_shape)
+      for mat_a, mat_b in zip(op_a.values(), op_b.values()):
+        new_data += mat_a.dot(mat_b.T)
+      dst_block.Write( new_data )
+      # 3. reset the dict to all None
+#      for op in [op_a, op_b]:
+#        for key in op.keys():
+#          op[key] = None
+  return CalculateSumOfABT
+
+def MakeAAT(other, r=0, c=0):
+  ret = SparseBlock(r, c)
+
+  """ 1. collect dense matrix"""
+  other.PropogateAbsolutePos()
+  dmat = list(other(DenseMatrix))
+
+  """ 2. sperate mat in different row """
+  row_mat = defaultdict(list)
+  for dm in dmat:
+    r = dm.absolute_pos[0]
+    row_mat[r].append(dm)
+  keys_r = sorted(row_mat.keys())
+
+  # make a dict for each, to easily reference each matrices by their columns number
+  row_dict = [ { dm.absolute_pos[1] : dm for dm in row_mat[r] } for r in keys_r ]
+  # for each row, find the common columns that they share with each other
+  for a, mat_ra in enumerate(row_dict):
+    ra = keys_r[a]
+
+    # for the row itself
+    dm_a = mat_ra.values()
+    new_dm_shape = (dm_a[0].shape[0],)*2
+    new_dm = DenseMatrix(ra, ra, new_dm_shape)
+    ret.AddElement(new_dm)
+
+    # generate a callback function that write this block
+    callback = _make_AAT_callback(new_dm, new_dm_shape, dm_a)
+    # register the callback
+    for dm in dm_a:
+      dm.post_callback.append(callback)
+
+    # for the rows below
+    set_mat_ra = set(mat_ra.keys())
+    for b, mat_rb in enumerate(row_dict[a+1:]):
+      rb = keys_r[a+1 + b]
+      comm_c_indices = set_mat_ra & set(mat_rb.keys())
+      if len(comm_c_indices) == 0: # empty
+        continue
+
+      dm_a = [mat_ra[c] for c in comm_c_indices]
+      dm_b = [mat_rb[c] for c in comm_c_indices]
+
+      # then there will a new block at (ra,rb) in the result MM' matrix
+      new_dm_shape = (dm_a[0].shape[0], dm_b[0].shape[0])
+      new_dm = DenseMatrix(ra, rb, new_dm_shape)
+      ret.AddElement(new_dm)
+
+      callback = _make_ABT_callback(new_dm, new_dm_shape, dm_a, dm_b)
+
+      for dm in dm_a+dm_b:
+        dm.post_callback.append(callback)
+  return ret
+
+def test_MakeAAT():
+  sb = SparseBlock()
+  id1 = sb.NewDenseMatrix( 0, 0, (1,2) )
+  id2 = sb.NewDenseMatrix( 0, 3, (1,3) )
+  id3 = sb.NewDenseMatrix( 1, 3, (3,3) )
+  sp_a = sb.BuildSparseMatrix()
+
+  aat = MakeAAT(sb)
+  sb.PutDenseMatrix(id1, np.full((1,2), 1.) )
+  sb.PutDenseMatrix(id2, np.full((1,3), 2.) )
+  sb.PutDenseMatrix(id3, np.full((3,3), 3.) )
+  sp_aat = aat.BuildSparseMatrix()
+
+  # upper triangular of sp_a*sp_a.T,
+  assert_array_equal(sp_aat.A,
+                    [[ 14.,  18.,  18.,  18.],
+                     [  0.,  27.,  27.,  27.],
+                     [  0.,  27.,  27.,  27.],
+                     [  0.,  27.,  27.,  27.]])
+  # auto update
+  sb.PutDenseMatrix(id2, np.full((1,3), 4.) )
+  assert_array_equal(sp_aat.A,
+                    [[ 50.,  36.,  36.,  36.],
+                     [  0.,  27.,  27.,  27.],
+                     [  0.,  27.,  27.,  27.],
+                     [  0.,  27.,  27.,  27.]])
+
+
 #%% CompoundVector
 class ArrayID(object):
   __slots__ = 'addr','data'
