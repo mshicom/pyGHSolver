@@ -438,12 +438,12 @@ def _make_ABT_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b)
 #          op[key] = None
   return CalculateSumOfABT
 
-def MakeAAT(other, make_full=True, r=0, c=0):
+def MakeAAT(A, make_full=True, r=0, c=0):
   ret = SparseBlock(r, c)
 
   """ 1. collect dense matrix"""
-  other.PropogateAbsolutePos()
-  dmat = list(other(DenseMatrix))
+  A.PropogateAbsolutePos()
+  dmat = list(A(DenseMatrix))
 
   """ 2. sperate mat in different row """
   row_mat = defaultdict(list)
@@ -518,6 +518,117 @@ def test_MakeAAT():
                      [ 36.,  27.,  27.,  27.],
                      [ 36.,  27.,  27.,  27.],
                      [ 36.,  27.,  27.,  27.]])
+
+def _make_AB_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b):
+  op_a, op_b = OrderedDict(), OrderedDict()
+  for dm_a_, dm_b_ in zip(src_dm_list_a, src_dm_list_b):
+    op_a[dm_a_] = None
+    op_b[dm_b_] = None
+
+  def CalculateSumOfAB(obj, array):
+    # 1. record the incoming data
+    if obj in op_a:
+      op_a[obj] = array
+    elif obj in op_b:
+      op_b[obj] = array
+    else:
+      raise RuntimeError("called by wrong object")
+    # 2. do calculation once all data are ready
+    if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
+      new_data = np.zeros(dst_block_shape)
+      for mat_a, mat_b in zip(op_a.values(), op_b.values()):
+        new_data += mat_a.dot(mat_b)
+      dst_block.Write( new_data )
+      # 3. reset the dict to all None
+#      for op in [op_a, op_b]:
+#        for key in op.keys():
+#          op[key] = None
+  return CalculateSumOfAB
+
+def MakeAB(A, B, r=0, c=0):
+  AB = SparseBlock(r, c)
+
+  """ 1. collect dense matrix"""
+  row_mat = defaultdict(list)
+  A.PropogateAbsolutePos()
+  for dm in A(DenseMatrix):
+    r = dm.absolute_pos[0]
+    row_mat[r].append(dm)
+  keys_r = sorted(row_mat.keys())
+
+  col_mat = defaultdict(list)
+  B.PropogateAbsolutePos()
+  for dm in B(DenseMatrix):
+    c = dm.absolute_pos[1]
+    col_mat[c].append(dm)
+  keys_c = sorted(col_mat.keys())
+
+  # make a dict for each, to easily reference each matrices by their columns number
+  row_dict = [ { dm.absolute_pos[1] : dm for dm in row_mat[r] } for r in keys_r ]
+  col_dict = [ { dm.absolute_pos[0] : dm for dm in col_mat[c] } for c in keys_c ]
+
+  # for each row, find the common columns that they share with each other
+  for a, mat_ra in enumerate(row_dict):
+    ra = keys_r[a]
+    set_mat_ra = set(mat_ra.keys())
+
+    for b, mat_cb in enumerate(col_dict):
+      cb = keys_c[b]
+
+      comm_indices = set_mat_ra & set(mat_cb.keys())
+      if len(comm_indices) == 0: # empty
+        continue
+
+      dm_a = [mat_ra[i] for i in comm_indices]
+      dm_b = [mat_cb[i] for i in comm_indices]
+
+      # then there will a new block at (ra,cb) in the result A*B matrix
+      new_dm_shape = (dm_a[0].shape[0], dm_b[0].shape[1])
+      new_dm = DenseMatrix(ra, cb, new_dm_shape)
+      AB.AddElement(new_dm)
+
+      callback = _make_AB_callback(new_dm, new_dm_shape, dm_a, dm_b)
+
+      for dm in dm_a+dm_b:
+        dm.post_callback.append(callback)
+  return AB
+
+def test_MakeAB():
+  A = SparseBlock()
+  id1 = A.NewDenseMatrix( 0, 0, (3,1) )
+  id2 = A.NewDenseMatrix( 0, 1, (3,2) )
+  id3 = A.NewDenseMatrix( 0, 3, (3,3) )
+  sp_a = A.BuildSparseMatrix()
+
+  W = SparseBlock()
+  id1w = W.NewDenseMatrix( 0, 0, (1,1) )
+  id2w = W.NewDenseMatrix( 1, 1, (2,2) )
+  id3w = W.NewDenseMatrix( 3, 3, (3,3) )
+  sp_w = W.BuildSparseMatrix()
+  sp_w.A
+
+  AW = MakeAB(A,W)
+  A.PutDenseMatrix(id1, np.full((3,1), 1.) )
+  A.PutDenseMatrix(id2, np.full((3,2), 2.) )
+  A.PutDenseMatrix(id3, np.full((3,3), 3.) )
+  W.PutDenseMatrix(id1w, np.full((1,1), 3.) )
+  W.PutDenseMatrix(id2w, np.full((2,2), 2.) )
+  W.PutDenseMatrix(id3w, np.full((3,3), 1.) )
+
+  sp_aw = AW.BuildSparseMatrix()
+  sp_aw.A
+  # = (sp_a*sp_w).A,
+  assert_array_equal(sp_aw.A,
+                    [[ 3.,  8.,  8.,  9.,  9.,  9.],
+                     [ 3.,  8.,  8.,  9.,  9.,  9.],
+                     [ 3.,  8.,  8.,  9.,  9.,  9.]])
+
+  # auto update
+  A.PutDenseMatrix(id2, np.full((3,2), 4.) )
+  assert_array_equal(sp_aw.A,
+                    [[  3.,  16.,  16.,   9.,   9.,   9.],
+                     [  3.,  16.,  16.,   9.,   9.,   9.],
+                     [  3.,  16.,  16.,   9.,   9.,   9.]])
 
 
 #%% CompoundVector
@@ -990,6 +1101,7 @@ if __name__ == '__main__':
 
   test_MatrixTreeNode()
   test_MakeSymmetric()
+  test_MakeAB()
   test_MakeAAT()
   test_ArrayID()
   test_CompoundVector()
@@ -1020,8 +1132,11 @@ if __name__ == '__main__':
   lc   = problem.CompoundObservation()
   l0   = lc.copy()
   W    = problem.MakeWeightMatrix()
-  kkt  = problem.MakeKKTMatrix()
-  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
+  BBT  = MakeAAT(problem.mat_jac_l).BuildSparseMatrix()
+  problem.UpdateJacobian()
+
+#  kkt  = problem.MakeKKTMatrix()
+#  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
 ##  a = kkt.A
 #  problem.UpdateJacobian()
 ##  op = CholeskyOperator(kkt)
