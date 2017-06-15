@@ -359,7 +359,6 @@ def MakeSymmetric(other, r=0, c=0):
   other.PropogateAbsolutePos()
   dmat = list(other(DenseMatrix))
 
-  """ """
   for dm in dmat:
     r,c = dm.absolute_pos[0], dm.absolute_pos[1]
     if r!=c: # only mirror off diagonal matrix
@@ -521,6 +520,7 @@ def _make_AWAT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_w):
       raise RuntimeError("called by wrong object")
     # 2. do calculation once all data are ready
     if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
+      print "All element collected"
       new_data = np.zeros(dst_block_shape)
       for mat_a, mat_w in zip(op_a.values(), op_w.values()):
         new_data += mat_a.dot(mat_w).dot(mat_a.T)
@@ -549,6 +549,7 @@ def _make_AWBT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b, src_dm_w
       raise RuntimeError("called by wrong object")
     # 2. do calculation once all data are ready
     if not np.any( [op is None for op in chain(op_a.values(),op_b.values(),op_w.values())] ):
+      print "All element collected"
       new_data = np.zeros(dst_block_shape)
       for mat_a, mat_b, mat_w in zip(op_a.values(), op_b.values(),op_w.values()):
         new_data += mat_a.dot(mat_w).dot(mat_b.T)
@@ -565,14 +566,14 @@ def MakeAWAT(A, W, make_full=True, r=0, c=0):
   """ 1. collect dense matrix and sperate mat in different row"""
   A.PropogateAbsolutePos()
   row_mat = defaultdict(list)
-  for dm in A(DenseMatrix):
+  for dm in list(A(DenseMatrix)):
     r = dm.absolute_pos[0]
     row_mat[r].append(dm)
   keys_r = sorted(row_mat.keys())
 
   W.PropogateAbsolutePos()
   w_mat = {}
-  for dm in W(DenseMatrix):
+  for dm in list(W(DenseMatrix)):
     r,c = dm.absolute_pos
     if r==c:
       w_mat[r] = dm
@@ -660,6 +661,43 @@ def test_MakeAWAT():
                      [ 146.,  146.,  146.],
                      [ 146.,  146.,  146.]])
   print "test_MakeAWAT passed"
+
+
+def _make_inv_callback(dst_block):
+  def WriteInv(obj, array):
+    dst_block.Write(np.linalg.inv(array))
+  return WriteInv
+
+def MakeBlockInv(other):
+  ret  = SparseBlock()
+  other.PropogateAbsolutePos()
+  for dm in other(DenseMatrix):
+    r,c = dm.absolute_pos[0], dm.absolute_pos[1]
+
+    dm_inv = DenseMatrix(r, c, dm.shape)
+    dm.post_callback.append( _make_inv_callback(dm_inv) )
+    ret.AddElement(dm_inv)
+  return ret
+
+def test_MakeBlockInv():
+  d = SparseBlock()
+  id1 = d.NewDenseMatrix(0,0,(3,3))
+  id2 = d.NewDenseMatrix(3,3,(3,3))
+  sp_d = d.BuildSparseMatrix()
+
+  d_inv = MakeBlockInv(d)
+  d.PutDenseMatrix(id1, 0.5*np.eye(3))
+  d.PutDenseMatrix(id2, 2*np.eye(3))
+  sp_dinv = d_inv.BuildSparseMatrix()
+
+  assert_array_equal(sp_dinv.A,
+                    [[ 2. ,  0. ,  0. ,  0. ,  0. ,  0. ],
+                     [ 0. ,  2. ,  0. ,  0. ,  0. ,  0. ],
+                     [ 0. ,  0. ,  2. ,  0. ,  0. ,  0. ],
+                     [ 0. ,  0. ,  0. ,  0.5,  0. ,  0. ],
+                     [ 0. ,  0. ,  0. ,  0. ,  0.5,  0. ],
+                     [ 0. ,  0. ,  0. ,  0. ,  0. ,  0.5]])
+
 
 
 
@@ -770,23 +808,18 @@ def test_CompoundVector():
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
   VariableBlock   = namedtuple('VariableBlock'   , ['seg', 'seg_param', 'param'])
-  ObservationBlock= namedtuple('ObservationBlock', ['seg', 'seg_param', 'param', 'mat_w_id'])
+  ObservationBlock= namedtuple('ObservationBlock', ['seg', 'seg_param', 'param', 'mat_sig_id'])
 
   def __init__(self):
     self.cv_x   = CompoundVectorWithDict()
     self.cv_l   = CompoundVectorWithDict()
     self.cv_res = CompoundVector()
 
-    self.mat_kkt   = CompoundMatrix()
-    self.mat_w     = SparseBlock(0,1)
-    self.mat_jac_x = SparseBlock(1,0)
-    self.mat_jac_l = SparseBlock(1,1)
+    self.mat_sigma     = SparseBlock()
+    self.mat_jac_x = SparseBlock()
+    self.mat_jac_l = SparseBlock()
 
-    self.mat_kkt.AddElement(self.mat_w)
-    self.mat_kkt.AddElement(self.mat_jac_x)
-    self.mat_kkt.AddElement(self.mat_jac_l)
-
-    self.Jx, self.Jl, self.W = None,None, None
+    self.Jx, self.Jl, self.Sigma, self.W = None,None,None,None
 
     self.constraint_blocks = []    # list of ConstraintBlock
     self.variance_factor = -1.0
@@ -815,10 +848,10 @@ class GaussHelmertProblem(object):
 
       if not offset in self.dict_observation_block:
         dim_l = len(l)
-        mat_w_id = self.mat_w.NewDiagonalMatrix(offset, offset, dim_l)
-        self.mat_w.PutDenseMatrix(mat_w_id, np.ones(dim_l))
+        mat_sig_id = self.mat_sigma.NewDenseMatrix(offset, offset, (dim_l,)*2)
+        self.mat_sigma.PutDenseMatrix(mat_sig_id, np.eye(dim_l))
 
-        item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_w_id )
+        item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_sig_id )
         self.dict_observation_block[offset] = item
     return l_off, l_vec
 
@@ -919,7 +952,7 @@ class GaussHelmertProblem(object):
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
-  def SetSigma(self, array, sigma, isInv=False):
+  def SetSigma(self, array, sigma):
     if not isinstance(array, list):
       array = [array]
     if not isinstance(sigma, list):
@@ -933,8 +966,7 @@ class GaussHelmertProblem(object):
       else:
         l_off, _ = self.cv_l.FindVector(ar)
       if not l_off is None:
-        w = si if isInv else 1./si
-        self.mat_w.PutDenseMatrix( self.dict_observation_block[l_off].mat_w_id, w)
+        self.mat_sigma.PutDenseMatrix( self.dict_observation_block[l_off].mat_sig_id, np.diag(si))
 
 
   def SetParameterization(self, array, parameterization):
@@ -977,22 +1009,44 @@ class GaussHelmertProblem(object):
 
     return self.Jx, self.Jl
 
-  def MakeWeightMatrix(self):
-    self.W = self.mat_w.BuildSparseMatrix()
-    return self.W
+  def MakeReducedKKTMatrix(self):
+    dim_x, dim_res = self.dim_x,  self.dim_res
+    dim_total = dim_x + dim_res
 
-  def MakeKKTMatrix(self):
+    self.mat_jac_l.OverwriteRC(0, 0)
+    self.mat_sigma.OverwriteRC(0, 0)
+    self.mat_jac_x.OverwriteRC(0, dim_res)
+    mat_BSBT = MakeAWAT(self.mat_jac_l, self.mat_sigma, make_full=False)
+    mat_kkt   = CompoundMatrix()
+    mat_kkt.AddElement(mat_BSBT)
+    mat_kkt.AddElement(self.mat_jac_x)
+#
+    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total))
+
+  def MakeSigmaAndWeightMatrix(self):
+    self.mat_w = MakeBlockInv(self.mat_sigma)
+    self.Sigma = self.mat_sigma.BuildSparseMatrix()
+
+    self.W     = self.mat_w.BuildSparseMatrix()
+    return self.Sigma, self.W
+
+  def MakeLargeKKTMatrix(self):
     dim_x, dim_l, dim_res = self.dim_x, self.dim_l, self.dim_res
     dim_total = dim_x + dim_l + dim_res
 
-    self.mat_w.OverwriteRC(dim_x, dim_x)
+    self.mat_sigma.OverwriteRC(dim_x, dim_x)
     self.mat_jac_x.OverwriteRC(dim_x+dim_l, 0)
     self.mat_jac_l.OverwriteRC(dim_x+dim_l, dim_x)
 
-    kkt = self.mat_kkt.BuildSparseMatrix((dim_total,dim_total))
+    mat_kkt   = CompoundMatrix()
+    mat_kkt.AddElement(self.mat_sigma)
+    mat_kkt.AddElement(self.mat_jac_x)
+    mat_kkt.AddElement(self.mat_jac_l)
+
+    kkt = mat_kkt.BuildSparseMatrix((dim_total,dim_total))
     return kkt
 
-  def MakeKKTSegmentSlice(self):
+  def MakeLargeKKTSegmentSlice(self):
     offset =  np.cumsum([0]+self.dims)
     segment_x = slice(offset[0], offset[1])
     segment_l = slice(offset[1], offset[2])
@@ -1113,7 +1167,8 @@ def test_ProblemJacobian():
   assert_array_equal( Jl.todense(), DiagonalRepeat(B, num_l) )
 
   # weight
-  W = problem.MakeWeightMatrix()
+  Sig, W = problem.MakeSigmaAndWeightMatrix()
+  assert_array_equal(Sig.todense(), DiagonalRepeat(np.diag(sigma), num_l) )
   assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
 
   # 2 method
@@ -1136,37 +1191,40 @@ if __name__ == '__main__':
   test_MakeSymmetric()
   test_MakeAB()
   test_MakeAWAT()
+  test_MakeBlockInv()
+
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
 
+  dim_x, num_x = 3, 1
+  dim_l, num_l = 4, 3*num_x
 
-#  dim_x, num_x = 3, 1
-#  dim_l, num_l = 4, 3*num_x
-#
-#  dim_g = 3
-#  A = np.random.rand(dim_g, dim_x)
-#  B = np.random.rand(dim_g, dim_l)
-#  AffineConstraint = MakeAffineConstraint(A,B)
-#
-#  x = np.ones((num_x, dim_x))
-#  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
-#
-#  problem = GaussHelmertProblem()
-#  for i in range(num_x):
-#    for j in range(num_l/num_x):
-#      problem.AddConstraintUsingAD(AffineConstraint,
-#                                   [ x[i] ],
-#                                   [ l[i][j] ])
-#  dims = problem.dims
-#  total_dim = sum(dims)
-#  res  = problem.CompoundResidual()
-#  xc   = problem.CompoundParameters()
-#  lc   = problem.CompoundObservation()
-#  l0   = lc.copy()
-#  W    = problem.MakeWeightMatrix()
-#  BBT  = MakeAWAT(problem.mat_jac_l, problem.mat_w).BuildSparseMatrix()
-#  problem.UpdateJacobian()
+  dim_g = 3
+  A = np.random.rand(dim_g, dim_x)
+  B = np.random.rand(dim_g, dim_l)
+  AffineConstraint = MakeAffineConstraint(A,B)
+
+  x = np.ones((num_x, dim_x))
+  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+
+  problem = GaussHelmertProblem()
+  for i in range(num_x):
+    for j in range(num_l/num_x):
+      problem.AddConstraintUsingAD(AffineConstraint,
+                                   [ x[i] ],
+                                   [ l[i][j] ])
+      problem.SetSigma(l[i][j], 0.5*np.ones(dim_l))
+  dims = problem.dims
+  total_dim = sum(dims)
+  res  = problem.CompoundResidual()
+  xc   = problem.CompoundParameters()
+  lc   = problem.CompoundObservation()
+  l0   = lc.copy()
+  KKT  = problem.MakeReducedKKTMatrix()
+  Sig,W = problem.MakeSigmaAndWeightMatrix()
+  problem.UpdateJacobian()
+  KKT.A
 
 #  kkt  = problem.MakeKKTMatrix()
 #  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
