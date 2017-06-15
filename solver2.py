@@ -392,136 +392,10 @@ def test_MakeSymmetric():
                      [ 0.,  0.,  0.]])
 #%%
 from collections import defaultdict,OrderedDict
-def _make_AAT_callback(dst_block, dst_block_shape, src_dm_list):
-  op_a = {dm : None for dm in src_dm_list}
-  def CalculateSumOfAAT(obj, array):
-    # 1. record the incoming data
-    if obj in op_a:
-      op_a[obj] = array
-    else:
-      raise RuntimeError("called by wrong object")
-    # 2. do calculation once all data are ready
-    if not np.any( [op is None for op in op_a.values()] ): # None in op_a.values():
-      new_data = np.zeros(dst_block_shape)
-      for mat in op_a.values():
-        new_data += mat.dot(mat.T)
-      dst_block.Write( new_data )
-      # 3. reset the dict to all None
-#      for key in op_a.keys():
-#          op_a[key] = None
 
-  return CalculateSumOfAAT
-
-def _make_ABT_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b):
+def _make_AB_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b):
   op_a, op_b = OrderedDict(), OrderedDict()
-  for dm_a_, dm_b_ in zip(src_dm_list_a, src_dm_list_b):
-    op_a[dm_a_] = None
-    op_b[dm_b_] = None
-
-  def CalculateSumOfABT(obj, array):
-    # 1. record the incoming data
-    if obj in op_a:
-      op_a[obj] = array
-    elif obj in op_b:
-      op_b[obj] = array
-    else:
-      raise RuntimeError("called by wrong object")
-    # 2. do calculation once all data are ready
-    if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
-      new_data = np.zeros(dst_block_shape)
-      for mat_a, mat_b in zip(op_a.values(), op_b.values()):
-        new_data += mat_a.dot(mat_b.T)
-      dst_block.Write( new_data )
-      # 3. reset the dict to all None
-#      for op in [op_a, op_b]:
-#        for key in op.keys():
-#          op[key] = None
-  return CalculateSumOfABT
-
-def MakeAAT(A, make_full=True, r=0, c=0):
-  ret = SparseBlock(r, c)
-
-  """ 1. collect dense matrix"""
-  A.PropogateAbsolutePos()
-  dmat = list(A(DenseMatrix))
-
-  """ 2. sperate mat in different row """
-  row_mat = defaultdict(list)
-  for dm in dmat:
-    r = dm.absolute_pos[0]
-    row_mat[r].append(dm)
-  keys_r = sorted(row_mat.keys())
-
-  # make a dict for each, to easily reference each matrices by their columns number
-  row_dict = [ { dm.absolute_pos[1] : dm for dm in row_mat[r] } for r in keys_r ]
-  # for each row, find the common columns that they share with each other
-  for a, mat_ra in enumerate(row_dict):
-    ra = keys_r[a]
-
-    # for the row itself
-    dm_a = mat_ra.values()
-    new_dm_shape = (dm_a[0].shape[0],)*2
-    new_dm = DenseMatrix(ra, ra, new_dm_shape)
-    ret.AddElement(new_dm)
-
-    # generate a callback function that write this block
-    callback = _make_AAT_callback(new_dm, new_dm_shape, dm_a)
-    # register the callback
-    for dm in dm_a:
-      dm.post_callback.append(callback)
-
-    # for the rows below
-    set_mat_ra = set(mat_ra.keys())
-    for b, mat_rb in enumerate(row_dict[a+1:]):
-      rb = keys_r[a+1 + b]
-      comm_c_indices = set_mat_ra & set(mat_rb.keys())
-      if len(comm_c_indices) == 0: # empty
-        continue
-
-      dm_a = [mat_ra[c] for c in comm_c_indices]
-      dm_b = [mat_rb[c] for c in comm_c_indices]
-
-      # then there will a new block at (ra,rb) in the result MM' matrix
-      new_dm_shape = (dm_a[0].shape[0], dm_b[0].shape[0])
-      new_dm = DenseMatrix(ra, rb, new_dm_shape)
-      ret.AddElement(new_dm)
-
-      callback = _make_ABT_callback(new_dm, new_dm_shape, dm_a, dm_b)
-
-      for dm in dm_a+dm_b:
-        dm.post_callback.append(callback)
-  return MakeSymmetric(ret) if make_full else ret
-
-def test_MakeAAT():
-  sb = SparseBlock()
-  id1 = sb.NewDenseMatrix( 0, 0, (1,2) )
-  id2 = sb.NewDenseMatrix( 0, 3, (1,3) )
-  id3 = sb.NewDenseMatrix( 1, 3, (3,3) )
-  sp_a = sb.BuildSparseMatrix()
-
-  aat = MakeAAT(sb)
-  sb.PutDenseMatrix(id1, np.full((1,2), 1.) )
-  sb.PutDenseMatrix(id2, np.full((1,3), 2.) )
-  sb.PutDenseMatrix(id3, np.full((3,3), 3.) )
-  sp_aat = aat.BuildSparseMatrix()
-
-  # upper triangular of sp_a*sp_a.T,
-  assert_array_equal(sp_aat.A,
-                    [[ 14.,  18.,  18.,  18.],
-                     [ 18.,  27.,  27.,  27.],
-                     [ 18.,  27.,  27.,  27.],
-                     [ 18.,  27.,  27.,  27.]])
-  # auto update
-  sb.PutDenseMatrix(id2, np.full((1,3), 4.) )
-  assert_array_equal(sp_aat.A,
-                    [[ 50.,  36.,  36.,  36.],
-                     [ 36.,  27.,  27.,  27.],
-                     [ 36.,  27.,  27.,  27.],
-                     [ 36.,  27.,  27.,  27.]])
-
-def _make_AB_callback(dst_block, dst_block_shape, src_dm_list_a, src_dm_list_b):
-  op_a, op_b = OrderedDict(), OrderedDict()
-  for dm_a_, dm_b_ in zip(src_dm_list_a, src_dm_list_b):
+  for dm_a_, dm_b_ in zip(src_dm_a, src_dm_b):
     op_a[dm_a_] = None
     op_b[dm_b_] = None
 
@@ -629,6 +503,164 @@ def test_MakeAB():
                     [[  3.,  16.,  16.,   9.,   9.,   9.],
                      [  3.,  16.,  16.,   9.,   9.,   9.],
                      [  3.,  16.,  16.,   9.,   9.,   9.]])
+  print "test_MakeAB passed "
+
+def _make_AWAT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_w):
+  op_a, op_w = OrderedDict(), OrderedDict()
+  for dm_a_, dm_w_ in zip(src_dm_a, src_dm_w):
+    op_a[dm_a_] = None
+    op_w[dm_w_] = None
+
+  def CalculateSumOfAWAT(obj, array):
+    # 1. record the incoming data
+    if obj in op_a:
+      op_a[obj] = array.copy()
+    elif obj in op_w:
+      op_w[obj] = array.copy()
+    else:
+      raise RuntimeError("called by wrong object")
+    # 2. do calculation once all data are ready
+    if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
+      new_data = np.zeros(dst_block_shape)
+      for mat_a, mat_w in zip(op_a.values(), op_w.values()):
+        new_data += mat_a.dot(mat_w).dot(mat_a.T)
+      dst_block.Write( new_data )
+      # 3. reset the dict to all None, except op_w which is usually constant
+      for key in op_a.keys():
+        op_a[key] = None
+  return CalculateSumOfAWAT
+
+def _make_AWBT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b, src_dm_w):
+  op_a, op_b, op_w = OrderedDict(), OrderedDict(), OrderedDict()
+  for dm_a_, dm_b_, dm_w_ in zip(src_dm_a, src_dm_b, src_dm_w):
+    op_a[dm_a_] = None
+    op_b[dm_b_] = None
+    op_w[dm_w_] = None
+
+  def CalculateSumOfAWBT(obj, array):
+    # 1. record the incoming data
+    if obj in op_a:
+      op_a[obj] = array.copy()
+    elif obj in op_b:
+      op_b[obj] = array.copy()
+    elif obj in op_w:
+      op_w[obj] = array.copy()
+    else:
+      raise RuntimeError("called by wrong object")
+    # 2. do calculation once all data are ready
+    if not np.any( [op is None for op in chain(op_a.values(),op_b.values(),op_w.values())] ):
+      new_data = np.zeros(dst_block_shape)
+      for mat_a, mat_b, mat_w in zip(op_a.values(), op_b.values(),op_w.values()):
+        new_data += mat_a.dot(mat_w).dot(mat_b.T)
+      dst_block.Write( new_data )
+      # 3. reset the dict to all None
+      for op in [op_a, op_b]:
+        for key in op.keys():
+          op[key] = None
+  return CalculateSumOfAWBT
+
+def MakeAWAT(A, W, make_full=True, r=0, c=0):
+  ret = SparseBlock(r, c)
+
+  """ 1. collect dense matrix and sperate mat in different row"""
+  A.PropogateAbsolutePos()
+  row_mat = defaultdict(list)
+  for dm in A(DenseMatrix):
+    r = dm.absolute_pos[0]
+    row_mat[r].append(dm)
+  keys_r = sorted(row_mat.keys())
+
+  W.PropogateAbsolutePos()
+  w_mat = {}
+  for dm in W(DenseMatrix):
+    r,c = dm.absolute_pos
+    if r==c:
+      w_mat[r] = dm
+  keys_w = sorted(w_mat.keys())
+
+  # make a dict for each, to easily reference each matrices by their columns number
+  row_dict = [ { dm.absolute_pos[1] : dm for dm in row_mat[r] } for r in keys_r  ]
+  # for each row, find the common columns that they share with each other
+  for a, mat_ra in enumerate(row_dict):
+    ra = keys_r[a]
+    set_mat_ra = set(mat_ra.keys())
+    set_mat_w  = set(keys_w)
+    comm_c_indices = set_mat_ra & set_mat_w
+    if len(comm_c_indices) != 0: # empty
+      dm_a = [mat_ra[c] for c in comm_c_indices]
+      dm_w = [w_mat[c]  for c in comm_c_indices]
+      # then there will a new block at (ra,rb) in the result MM' matrix
+      new_dm_shape = (dm_a[0].shape[0],)*2
+      new_dm = DenseMatrix(ra, ra, new_dm_shape)
+      ret.AddElement(new_dm)
+
+      callback = _make_AWAT_callback(new_dm, new_dm_shape, dm_a, dm_w)
+      for dm in chain(dm_a,dm_w):
+        dm.post_callback.append(callback)
+
+    # for the row below
+    for b, mat_rb in enumerate(row_dict[a+1:]):
+      rb = keys_r[a+1 + b]
+
+      comm_c_indices = set_mat_ra & set(mat_rb.keys()) & set_mat_w
+      if len(comm_c_indices) == 0: # empty
+        continue
+
+      dm_a = [mat_ra[c] for c in comm_c_indices]
+      dm_b = [mat_rb[c] for c in comm_c_indices]
+      dm_w = [w_mat[c]  for c in comm_c_indices]
+      # then there will a new block at (ra,rb) in the result MM' matrix
+      new_dm_shape = (dm_a[0].shape[0], dm_b[0].shape[0])
+      new_dm = DenseMatrix(ra, rb, new_dm_shape)
+      ret.AddElement(new_dm)
+
+      callback = _make_AWBT_callback(new_dm, new_dm_shape, dm_a, dm_b, dm_w)
+
+      for dm in chain(dm_a,dm_b,dm_w):
+        dm.post_callback.append(callback)
+
+  return MakeSymmetric(ret) if make_full else ret
+
+def test_MakeAWAT():
+  A = SparseBlock()
+  id1 = A.NewDenseMatrix( 0, 0, (3,1) )
+  id2 = A.NewDenseMatrix( 0, 1, (3,2) )
+  id3 = A.NewDenseMatrix( 0, 3, (3,3) )
+  sp_a = A.BuildSparseMatrix()
+  sp_a.A
+  W = SparseBlock()
+  id1w = W.NewDenseMatrix( 0, 0, (1,1) )
+  id2w = W.NewDenseMatrix( 1, 1, (2,2) )
+  id3w = W.NewDenseMatrix( 3, 3, (3,3) )
+  sp_w = W.BuildSparseMatrix()
+  sp_w.A
+
+  aat = MakeAWAT(A,W)
+  sp_aat = aat.BuildSparseMatrix()
+  assert sp_aat.shape == (3,3)
+
+  A.PutDenseMatrix(id1, np.full((3,1), 1.) )
+  A.PutDenseMatrix(id2, np.full((3,2), 2.) )
+  A.PutDenseMatrix(id3, np.full((3,3), 3.) )
+  W.PutDenseMatrix(id1w, np.full((1,1), 1.) )
+  W.PutDenseMatrix(id2w, np.full((2,2), 1.) )
+  W.PutDenseMatrix(id3w, np.full((3,3), 1.) )
+
+  # =(sp_a*sp_w*sp_a.T).A,
+  assert_array_equal(sp_aat.A,
+                    [[ 98.,  98.,  98.],
+                     [ 98.,  98.,  98.],
+                     [ 98.,  98.,  98.]])
+  # auto update
+  A.PutDenseMatrix(id1, np.full((3,1), 1.) )
+  A.PutDenseMatrix(id2, np.full((3,2), 4.) )
+  A.PutDenseMatrix(id3, np.full((3,3), 3.) )
+  assert_array_equal(sp_aat.A,
+                    [[ 146.,  146.,  146.],
+                     [ 146.,  146.,  146.],
+                     [ 146.,  146.,  146.]])
+  print "test_MakeAWAT passed"
+
 
 
 #%% CompoundVector
@@ -904,6 +936,7 @@ class GaussHelmertProblem(object):
         w = si if isInv else 1./si
         self.mat_w.PutDenseMatrix( self.dict_observation_block[l_off].mat_w_id, w)
 
+
   def SetParameterization(self, array, parameterization):
     var = VariableBlock(array)
     if var in self.parameter_dict:
@@ -1102,38 +1135,38 @@ if __name__ == '__main__':
   test_MatrixTreeNode()
   test_MakeSymmetric()
   test_MakeAB()
-  test_MakeAAT()
+  test_MakeAWAT()
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
 
 
-  dim_x, num_x = 3, 1
-  dim_l, num_l = 4, 3*num_x
-
-  dim_g = 3
-  A = np.random.rand(dim_g, dim_x)
-  B = np.random.rand(dim_g, dim_l)
-  AffineConstraint = MakeAffineConstraint(A,B)
-
-  x = np.ones((num_x, dim_x))
-  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
-
-  problem = GaussHelmertProblem()
-  for i in range(num_x):
-    for j in range(num_l/num_x):
-      problem.AddConstraintUsingAD(AffineConstraint,
-                                   [ x[i] ],
-                                   [ l[i][j] ])
-  dims = problem.dims
-  total_dim = sum(dims)
-  res  = problem.CompoundResidual()
-  xc   = problem.CompoundParameters()
-  lc   = problem.CompoundObservation()
-  l0   = lc.copy()
-  W    = problem.MakeWeightMatrix()
-  BBT  = MakeAAT(problem.mat_jac_l).BuildSparseMatrix()
-  problem.UpdateJacobian()
+#  dim_x, num_x = 3, 1
+#  dim_l, num_l = 4, 3*num_x
+#
+#  dim_g = 3
+#  A = np.random.rand(dim_g, dim_x)
+#  B = np.random.rand(dim_g, dim_l)
+#  AffineConstraint = MakeAffineConstraint(A,B)
+#
+#  x = np.ones((num_x, dim_x))
+#  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+#
+#  problem = GaussHelmertProblem()
+#  for i in range(num_x):
+#    for j in range(num_l/num_x):
+#      problem.AddConstraintUsingAD(AffineConstraint,
+#                                   [ x[i] ],
+#                                   [ l[i][j] ])
+#  dims = problem.dims
+#  total_dim = sum(dims)
+#  res  = problem.CompoundResidual()
+#  xc   = problem.CompoundParameters()
+#  lc   = problem.CompoundObservation()
+#  l0   = lc.copy()
+#  W    = problem.MakeWeightMatrix()
+#  BBT  = MakeAWAT(problem.mat_jac_l, problem.mat_w).BuildSparseMatrix()
+#  problem.UpdateJacobian()
 
 #  kkt  = problem.MakeKKTMatrix()
 #  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
