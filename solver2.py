@@ -110,22 +110,17 @@ class MatrixTreeNode(LexicalSortable):
     self.row, self.col = row, col
 
     """ 5. convert to Compressed Sparse Column (CSC)
-    * compressed(col) -> indices, where only the heads of each col are recorded,
-    if there are all-zero columns in right (ie. shape[1] > col[-1]), we should
-    repeat
+    * indices[0] = 0
+    * indices[i] = indices[i-1] + (nnz of column i-1)
+    * indices[-1] = total nnz
     """
-    if shape and shape[1]>col[-1]:
-      rep = shape[1] - col[-1]
-    else:
-      rep = 1
-
-    if 1:  # fast version
-      indptr, = np.where( np.diff(col) )  # np.diff : out[n] = a[n+1]-a[n]
-      indptr = np.r_[0, indptr+1, [nnz]*rep]
-    else:  # slow version
-      indptr = np.array([0] + [ i for i in xrange(1, nnz) if col[i] != col[i-1] ] + [nnz]*rep)
-
+    num_col = col.max()+1 if shape is None else shape[1]
+    col_cnt = np.zeros(num_col,'i')
+    cid,cnnz = np.unique(col, return_counts=True)
+    col_cnt[cid] = cnnz
+    indptr = np.cumsum(np.r_[0, col_cnt])
     self.indptr = indptr
+
     if coo:
       return scipy.sparse.coo_matrix( (data, (row, col) ), shape=shape)#, shape=self.shape
     else:
@@ -253,7 +248,7 @@ def test_MatrixTreeNode():
 
   sb = SparseBlock()
   id1 = sb.NewDenseMatrix( 0, 0, (4,3) )
-  id2 = sb.NewDenseMatrix( 0, 3, (2,3) )
+  id2 = sb.NewDenseMatrix( 0, 4, (2,3) )
 
   # iterator
   assert len(list(sb(SparseBlock))) == 1
@@ -266,34 +261,43 @@ def test_MatrixTreeNode():
                [(0, 0, 0, 0),
                 (0, 1, 0, 0),
                 (0, 2, 0, 0),
-                (3, 0, 0, 0),
-                (3, 1, 0, 0),
-                (3, 2, 0, 0)] )
+                (4, 0, 0, 0),
+                (4, 1, 0, 0),
+                (4, 2, 0, 0)] )
 
   # PropogateAbsolutePos
   sb.PropogateAbsolutePos()
   assert_equal(
     [s.absolute_pos for s in sb(DenseMatrixSegment)],
-    [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]])
+    [[0, 0], [0, 1], [0, 2], [0, 4], [0, 5], [0, 6]])
 
   sb.PropogateAbsolutePos(np.array([1,2]))
   assert_equal(
     [s.absolute_pos for s in sb(DenseMatrixSegment)],
-    [[1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [1, 7]])
+    [[1, 2], [1, 3], [1, 4], [1, 6], [1, 7], [1, 8]])
 
-  # BuildSparseMatrix
-  sbm = sb.BuildSparseMatrix()
+  # BuildSparseMatrix coo
+  sb_coo = sb.BuildSparseMatrix(coo=True)
   sb.data[:] = np.arange(sb.nnz)
-  assert_array_equal(sbm.A,
-                    [[  0.,   4.,   8.,  12.,  14.,  16.],
-                     [  1.,   5.,   9.,  13.,  15.,  17.],
-                     [  2.,   6.,  10.,   0.,   0.,   0.],
-                     [  3.,   7.,  11.,   0.,   0.,   0.]])
+  assert_array_equal(sb_coo.A,
+                    [[  0.,   4.,   8.,   0.,  12.,  14.,  16.],
+                     [  1.,   5.,   9.,   0.,  13.,  15.,  17.],
+                     [  2.,   6.,  10.,   0.,   0.,   0.,   0.],
+                     [  3.,   7.,  11.,   0.,   0.,   0.,   0.]])
+
+  sb_csc = sb.BuildSparseMatrix(coo=False)
+  sb.data[:] = np.arange(sb.nnz)
+  assert_array_equal(sb_csc.A,
+                    [[  0.,   4.,   8.,   0.,  12.,  14.,  16.],
+                     [  1.,   5.,   9.,   0.,  13.,  15.,  17.],
+                     [  2.,   6.,  10.,   0.,   0.,   0.,   0.],
+                     [  3.,   7.,  11.,   0.,   0.,   0.,   0.]])
+  assert_array_equal(sb_csc.indptr, sb_coo.tocsc().indptr )
 
   # write
   dm = np.arange(6).reshape(2,3)
   sb.PutDenseMatrix(id2, dm)
-  assert_array_equal(sbm.A[0:2,3:6], dm)
+  assert_array_equal(sb_csc.A[0:2,4:7], dm)
 
   # read
   dml = list(sb(DenseMatrix))
@@ -1003,13 +1007,13 @@ class GaussHelmertProblem(object):
   def dims(self):
     return [self.dim_x, self.dim_l, self.dim_res ]
 
-  def MakeJacobians(self):
-    self.Jx = self.mat_jac_x.BuildSparseMatrix()
-    self.Jl = self.mat_jac_l.BuildSparseMatrix()
+  def MakeJacobians(self,*args, **kwarg):
+    self.Jx = self.mat_jac_x.BuildSparseMatrix(*args, **kwarg)
+    self.Jl = self.mat_jac_l.BuildSparseMatrix(*args, **kwarg)
 
     return self.Jx, self.Jl
 
-  def MakeReducedKKTMatrix(self):
+  def MakeReducedKKTMatrix(self, *args, **kwarg):
     dim_x, dim_res = self.dim_x,  self.dim_res
     dim_total = dim_x + dim_res
 
@@ -1020,17 +1024,17 @@ class GaussHelmertProblem(object):
     mat_kkt   = CompoundMatrix()
     mat_kkt.AddElement(mat_BSBT)
     mat_kkt.AddElement(self.mat_jac_x)
-#
-    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total))
 
-  def MakeSigmaAndWeightMatrix(self):
+    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total),*args, **kwarg)
+
+  def MakeSigmaAndWeightMatrix(self, *args, **kwarg):
     self.mat_w = MakeBlockInv(self.mat_sigma)
-    self.Sigma = self.mat_sigma.BuildSparseMatrix()
+    self.Sigma = self.mat_sigma.BuildSparseMatrix(*args, **kwarg)
 
-    self.W     = self.mat_w.BuildSparseMatrix()
+    self.W     = self.mat_w.BuildSparseMatrix(*args, **kwarg)
     return self.Sigma, self.W
 
-  def MakeLargeKKTMatrix(self):
+  def MakeLargeKKTMatrix(self, *args, **kwarg):
     dim_x, dim_l, dim_res = self.dim_x, self.dim_l, self.dim_res
     dim_total = dim_x + dim_l + dim_res
 
@@ -1043,7 +1047,7 @@ class GaussHelmertProblem(object):
     mat_kkt.AddElement(self.mat_jac_x)
     mat_kkt.AddElement(self.mat_jac_l)
 
-    kkt = mat_kkt.BuildSparseMatrix((dim_total,dim_total))
+    kkt = mat_kkt.BuildSparseMatrix((dim_total,dim_total), *args, **kwarg)
     return kkt
 
   def MakeLargeKKTSegmentSlice(self):
@@ -1221,16 +1225,17 @@ if __name__ == '__main__':
   xc   = problem.CompoundParameters()
   lc   = problem.CompoundObservation()
   l0   = lc.copy()
-  KKT  = problem.MakeReducedKKTMatrix()
+  KKT  = problem.MakeReducedKKTMatrix( coo=True )
   Sig,W = problem.MakeSigmaAndWeightMatrix()
   problem.UpdateJacobian()
   KKT.A
+  op = CholeskyOperator(KKT)
+  Ja,Jb = problem.MakeJacobians()
 
 #  kkt  = problem.MakeKKTMatrix()
 #  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
 ##  a = kkt.A
 #  problem.UpdateJacobian()
-##  op = CholeskyOperator(kkt)
 #  op = CoordLinearOperator(problem.mat_kkt.data,
 #                           problem.mat_kkt.row,
 #                           problem.mat_kkt.col,
