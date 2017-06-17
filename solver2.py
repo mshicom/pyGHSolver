@@ -127,18 +127,20 @@ class MatrixTreeNode(LexicalSortable):
       return scipy.sparse.csc_matrix( (data, row, indptr), shape=shape)#, shape=self.shape
 
 class CompoundMatrix(MatrixTreeNode):
-  def __init__(self):
+  def __init__(self, sb_list=[]):
     super(CompoundMatrix, self).__init__(None, 0, 0)
     self.shape = None
+    for sb in sb_list:
+      self.AddElement(sb)
 
   def NewSparseBlock(self, r, c):
     sb = SparseBlock(r, c)
     return self.AddElement(sb)
 
 class SparseBlock(MatrixTreeNode):
-  def __init__(self, r=0, c=0):
+  def __init__(self, r=0, c=0, shape=None):
     super(SparseBlock, self).__init__(None, r, c)
-    self.shape = None
+    self.shape = shape
 
   def NewDenseMatrix(self, r, c, shape):
     dm = DenseMatrix(r, c, shape)
@@ -308,18 +310,28 @@ def test_MatrixTreeNode():
   sb = SparseBlock()
   id1 = sb.NewDenseMatrix( 0, 0, (4,3) )
   id2 = sb.NewDenseMatrix( 0, 3, (2,3) )
-  sb2 = SparseBlock(4, 6)
-  id = sb2.NewDenseMatrix( 0, 0, (3,3) )
+  sb2 = DenseMatrix( 4, 6, (3,3) )
 
   cm.AddElement(sb)
   cm.AddElement(sb2)
-  assert_equal( len(list(cm(SparseBlock))), 2)
+  assert_equal( len(list(cm(SparseBlock))), 1)
   assert_equal( len(list(cm(DenseMatrix))), 3)
   assert_equal( len(list(cm(DenseMatrixSegment))), 9)
 
-  cbm = cm.BuildSparseMatrix()
+  cm_coo = cm.BuildSparseMatrix()
   cm.data[:] = np.arange(cm.nnz)
-  assert_array_equal(cbm.A,
+  assert_array_equal(cm_coo.A,
+                    [[  0.,   4.,   8.,  12.,  14.,  16.,   0.,   0.,   0.],
+                     [  1.,   5.,   9.,  13.,  15.,  17.,   0.,   0.,   0.],
+                     [  2.,   6.,  10.,   0.,   0.,   0.,   0.,   0.,   0.],
+                     [  3.,   7.,  11.,   0.,   0.,   0.,   0.,   0.,   0.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  18.,  21.,  24.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  19.,  22.,  25.],
+                     [  0.,   0.,   0.,   0.,   0.,   0.,  20.,  23.,  26.]])
+
+  cm_csc = cm.BuildSparseMatrix(coo=False)
+  cm_csc.data[:] = np.arange(cm.nnz)
+  assert_array_equal(cm_csc.A,
                     [[  0.,   4.,   8.,  12.,  14.,  16.,   0.,   0.,   0.],
                      [  1.,   5.,   9.,  13.,  15.,  17.,   0.,   0.,   0.],
                      [  2.,   6.,  10.,   0.,   0.,   0.,   0.,   0.,   0.],
@@ -358,20 +370,40 @@ def _make_tranpose_callback(dst_block):
     dst_block.Write(array.T)
   return WriteTranspose
 
-def MakeSymmetric(other, r=0, c=0):
-  """ 1. collect dense matrix"""
-  other.PropogateAbsolutePos()
-  dmat = list(other(DenseMatrix))
+def MakeSymmetric(obj):
+  def _recursive_routine(src, parent):
+    """ The parent do nothing but mirror their off-diagonal(in absolute pos) children """
+    for e in copy(src.elements):  # use copy to ignore new attached element
+      r, c = e.absolute_pos[0], e.absolute_pos[1]
 
-  for dm in dmat:
-    r,c = dm.absolute_pos[0], dm.absolute_pos[1]
-    if r!=c: # only mirror off diagonal matrix
-      dm_t = DenseMatrix(c, r, tuple(reversed(dm.shape)))
-      dm.post_callback.append( _make_tranpose_callback(dm_t) )
-      other.AddElement(dm_t)
-    else:
-      assert dm.shape[0] == dm.shape[1]
-  return other
+      """ For DenseMatrix, make a callback and new DenseMatrix. Recursion end here."""
+      if isinstance(e, DenseMatrix):
+        if r != c:
+          e_t = DenseMatrix(e.c, e.r, (e.shape[1], e.shape[0]))
+          e.post_callback.append( _make_tranpose_callback(e_t) )
+          parent.AddElement(e_t)
+
+      else:
+        """ For abstract block, recursion is needed, and there are 2 cases: """
+        if r != c:
+          """ case 1: Off-diagonal, make a mirrored sibling. And subsequce
+          new node will be attaced to it.
+          """
+          e_t = type(e)(c, r)
+          parent.AddElement(e_t)
+          next_parent = e_t
+        else:
+          """ case 2: diagonal, do nothing, but its off-diagonal children will
+          be attaced to the block itself.
+          """
+          next_parent = src
+        """ recursion magic """
+        _recursive_routine(e, next_parent)
+
+  obj.PropogateAbsolutePos()
+  _recursive_routine(obj, obj)
+  return obj
+
 
 def test_MakeSymmetric():
   # main function
@@ -388,11 +420,32 @@ def test_MakeSymmetric():
                      [ 1.,  1.,  2.],
                      [ 2.,  2.,  0.]])
   # auto update
-  sb.PutDenseMatrix(id2, np.full((1,2), 0.) )
+  sb.PutDenseMatrix(id2, np.full((1,2), 3.) )
   assert_array_equal(sp.A,
-                    [[ 1.,  1.,  0.],
-                     [ 1.,  1.,  0.],
-                     [ 0.,  0.,  0.]])
+                    [[ 1.,  1.,  3.],
+                     [ 1.,  1.,  3.],
+                     [ 3.,  3.,  0.]])
+  # CompoundMatrix
+
+  sb1 = SparseBlock()
+  sb1.NewDenseMatrix(0,0,(4,4))
+  sb1.PutDenseMatrix(0, np.ones((4,4)))
+  sb2 = SparseBlock()
+  sb2.NewDenseMatrix(0,0,(4,1))
+  sb2.PutDenseMatrix(0, 3*np.ones((4,1)))
+  sb2.OverwriteRC(0, 5)
+
+  cm = CompoundMatrix([sb1,sb2])
+  MakeSymmetric(cm)
+  sp = cm.BuildSparseMatrix(coo=False)
+  assert_array_equal(sp.A,
+                    [[ 1.,  1.,  1.,  1.,  0.,  3.],
+                     [ 1.,  1.,  1.,  1.,  0.,  3.],
+                     [ 1.,  1.,  1.,  1.,  0.,  3.],
+                     [ 1.,  1.,  1.,  1.,  0.,  3.],
+                     [ 0.,  0.,  0.,  0.,  0.,  0.],
+                     [ 3.,  3.,  3.,  3.,  0.,  0.]])
+  print "test_MakeSymmetric passed"
 #%%
 from collections import defaultdict,OrderedDict
 
@@ -1007,9 +1060,9 @@ class GaussHelmertProblem(object):
   def dims(self):
     return [self.dim_x, self.dim_l, self.dim_res ]
 
-  def MakeJacobians(self,*args, **kwarg):
-    self.Jx = self.mat_jac_x.BuildSparseMatrix(*args, **kwarg)
-    self.Jl = self.mat_jac_l.BuildSparseMatrix(*args, **kwarg)
+  def MakeJacobians(self,**kwarg):
+    self.Jx = self.mat_jac_x.BuildSparseMatrix(**kwarg)
+    self.Jl = self.mat_jac_l.BuildSparseMatrix(**kwarg)
 
     return self.Jx, self.Jl
 
@@ -1025,16 +1078,16 @@ class GaussHelmertProblem(object):
     mat_kkt.AddElement(mat_BSBT)
     mat_kkt.AddElement(self.mat_jac_x)
 
-    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total),*args, **kwarg)
+    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total),**kwarg)
 
-  def MakeSigmaAndWeightMatrix(self, *args, **kwarg):
+  def MakeSigmaAndWeightMatrix(self, **kwarg):
     self.mat_w = MakeBlockInv(self.mat_sigma)
-    self.Sigma = self.mat_sigma.BuildSparseMatrix(*args, **kwarg)
+    self.Sigma = self.mat_sigma.BuildSparseMatrix(**kwarg)
 
-    self.W     = self.mat_w.BuildSparseMatrix(*args, **kwarg)
+    self.W     = self.mat_w.BuildSparseMatrix(**kwarg)
     return self.Sigma, self.W
 
-  def MakeLargeKKTMatrix(self, *args, **kwarg):
+  def MakeLargeKKTMatrix(self, **kwarg):
     dim_x, dim_l, dim_res = self.dim_x, self.dim_l, self.dim_res
     dim_total = dim_x + dim_l + dim_res
 
@@ -1047,7 +1100,7 @@ class GaussHelmertProblem(object):
     mat_kkt.AddElement(self.mat_jac_x)
     mat_kkt.AddElement(self.mat_jac_l)
 
-    kkt = mat_kkt.BuildSparseMatrix((dim_total,dim_total), *args, **kwarg)
+    kkt = mat_kkt.BuildSparseMatrix((dim_total,dim_total), **kwarg)
     return kkt
 
   def MakeLargeKKTSegmentSlice(self):
@@ -1225,12 +1278,12 @@ if __name__ == '__main__':
   xc   = problem.CompoundParameters()
   lc   = problem.CompoundObservation()
   l0   = lc.copy()
-  KKT  = problem.MakeReducedKKTMatrix( coo=True )
+  KKT  = problem.MakeReducedKKTMatrix( coo=False )
   Sig,W = problem.MakeSigmaAndWeightMatrix()
   problem.UpdateJacobian()
   KKT.A
-  op = CholeskyOperator(KKT)
-  Ja,Jb = problem.MakeJacobians()
+#  op = CholeskyOperator(KKT)
+#  Ja,Jb = problem.MakeJacobians()
 
 #  kkt  = problem.MakeKKTMatrix()
 #  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
