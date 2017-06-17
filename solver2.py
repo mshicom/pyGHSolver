@@ -868,7 +868,7 @@ class GaussHelmertProblem(object):
     res = g( *(x_list + l_list) )
     jac = var_jacobian(var)
     if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
-      RuntimeWarning("AutoDiff Not valid")
+      raise RuntimeWarning("AutoDiff Not valid")
       return
     dim_res = len(res)
 
@@ -926,7 +926,7 @@ class GaussHelmertProblem(object):
     res = g( *xl_vec )
     jac = var_jacobian(var)
     if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
-      RuntimeWarning("AutoDiff Not valid")
+      raise RuntimeWarning("AutoDiff Not valid")
       return
     dim_res = len(res)
 
@@ -1122,8 +1122,8 @@ def test_ProblemJacobian():
   B = np.random.rand(dim_g, dim_l)
   AffineConstraint = MakeAffineConstraint(A,B)
 
-  x = np.empty((num_x, dim_x))
-  l = [ np.empty((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+  x = np.zeros((num_x, dim_x))
+  l = [ np.ones((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
   sigma = np.full(dim_l, 0.5)
   problem = GaussHelmertProblem()
   for i in range(num_x):
