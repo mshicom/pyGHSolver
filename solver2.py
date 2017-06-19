@@ -1125,44 +1125,51 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
-def SolverByKKT(problem, maxit=10):
-  res  = problem.CompoundResidual()
-  xc   = problem.CompoundParameters()
-  lc   = problem.CompoundObservation()
-  l0   = lc.copy()
-
-  KKT      = problem.MakeReducedKKTMatrix( coo=False )
-  Sigma, W = problem.MakeSigmaAndWeightMatrix()
-  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
-  problem.UpdateJacobian()
-  problem.UpdateResidual()
-  op_A_inv = CholeskyOperator(KKT)
-
-  b = np.zeros( len(res)+len(xc) )
-  seg_lambda = slice(0, len(res))
-  seg_dx     = slice(len(res), None)
-  le  = lc - l0
-  for it in range(maxit):
-    print np.linalg.norm(res), le.dot(W*le)
-    b[seg_lambda]  = B * le - res
-
-    s   = op_A_inv * b
-    dx  = s[seg_dx]
-    lag = -s[seg_lambda]
-    dl = Sigma * (B.T * lag) + le
-
-    lc -= dl
-    xc += dx
-    le  = lc - l0
-
-    if np.abs(dx).max() < 1e-6:
-      break
-
+class KKTSolve(object):
+  def __init__(self, problem):
+    self.problem = problem
+    self.l0      = problem.CompoundObservation().copy()
+    self.KKT     = problem.MakeReducedKKTMatrix( coo=False )
+    self.Sigma, self.W = problem.MakeSigmaAndWeightMatrix()
+    self.B       = problem.mat_jac_l.BuildSparseMatrix( coo=False )
     problem.UpdateJacobian()
-    op_A_inv.UpdataFactor(KKT)
     problem.UpdateResidual()
+    try:
+      self.op_A_inv = CholeskyOperator(self.KKT)
+    except:
+      pass
 
-  return xc, lc - l0
+  def Solve(self, maxit = 20):
+    res  = self.problem.CompoundResidual()
+    xc   = self.problem.CompoundParameters()
+    lc   = self.problem.CompoundObservation()
+
+    b = np.zeros( len(res)+len(xc) )
+    seg_lambda = slice(0, len(res))
+    seg_dx     = slice(len(res), None)
+
+    le  = lc - self.l0
+    for it in range(maxit):
+      print np.linalg.norm(res), le.dot(self.W*le)
+      b[seg_lambda]  = self.B * le - res
+
+      s   = self.op_A_inv * b
+      dx  = s[seg_dx]
+      lag = -s[seg_lambda]
+      dl = self.Sigma * (self.B.T * lag) + le
+
+      lc -= dl
+      xc += dx
+      le  = lc - self.l0
+
+      if np.abs(dx).max() < 1e-6:
+        break
+
+      self.problem.UpdateJacobian()
+      self.op_A_inv.UpdataFactor(self.KKT)
+      self.problem.UpdateResidual()
+
+    return xc, le
 #%%
 def EqualityConstraint(a,b):
   return a-b
@@ -1325,5 +1332,5 @@ if __name__ == '__main__':
                                  [ x ],
                                  [ l[i] ])
     problem.SetSigma(l[i], sigma)
-  x_est, e  = SolverByKKT(problem)
+  x_est, e  = KKTSolve(problem).Solve()
   print x,x_est
