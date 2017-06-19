@@ -577,7 +577,7 @@ def _make_AWAT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_w):
       raise RuntimeError("called by wrong object")
     # 2. do calculation once all data are ready
     if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
-      print "All element collected"
+#      print "All element collected"
       new_data = np.zeros(dst_block_shape)
       for mat_a, mat_w in zip(op_a.values(), op_w.values()):
         new_data += mat_a.dot(mat_w).dot(mat_a.T)
@@ -919,10 +919,11 @@ class GaussHelmertProblem(object):
 
     """ 1. Generate Jacobian function by cppad """
     var       = np.hstack(x_list+l_list )
-    var_ad    = pycppad.independent( var )
-    var_jacobian= pycppad.adfun(var_ad, g( *np.split(var_ad, xl_indices) ) ).jacobian
+    var_in    = pycppad.independent( var )
+    var_out   = np.atleast_1d( g( *np.split(var_in, xl_indices) ) )
+    var_jacobian= pycppad.adfun(var_in, var_out).jacobian
 
-    res = g( *(x_list + l_list) )
+    res = np.atleast_1d( g( *(x_list + l_list) ) )
     jac = var_jacobian(var)
     if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
       raise RuntimeWarning("AutoDiff Not valid")
@@ -1023,7 +1024,9 @@ class GaussHelmertProblem(object):
       else:
         l_off, _ = self.cv_l.FindVector(ar)
       if not l_off is None:
-        self.mat_sigma.PutDenseMatrix( self.dict_observation_block[l_off].mat_sig_id, np.diag(si))
+        if len(si.shape) == 1:
+          si = np.diag(si)
+        self.mat_sigma.PutDenseMatrix( self.dict_observation_block[l_off].mat_sig_id, si)
 
 
   def SetParameterization(self, array, parameterization):
@@ -1074,11 +1077,9 @@ class GaussHelmertProblem(object):
     self.mat_sigma.OverwriteRC(0, 0)
     self.mat_jac_x.OverwriteRC(0, dim_res)
     mat_BSBT = MakeAWAT(self.mat_jac_l, self.mat_sigma, make_full=False)
-    mat_kkt   = CompoundMatrix()
-    mat_kkt.AddElement(mat_BSBT)
-    mat_kkt.AddElement(self.mat_jac_x)
+    mat_kkt   = CompoundMatrix([mat_BSBT, self.mat_jac_x])
 
-    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total,dim_total),**kwarg)
+    return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total, dim_total),**kwarg)
 
   def MakeSigmaAndWeightMatrix(self, **kwarg):
     self.mat_w = MakeBlockInv(self.mat_sigma)
@@ -1124,31 +1125,43 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
-def SolverByGaussElimination(problem, maxit=10):
+def SolverByKKT(problem, maxit=10):
   res  = problem.CompoundResidual()
   xc   = problem.CompoundParameters()
   lc   = problem.CompoundObservation()
   l0   = lc.copy()
 
-  Sigma= problem.MakeWeightMatrix()
-  Sigma.data[:] = 1./Sigma.data
-  W    = problem.MakeWeightMatrix()
-  Ja,Jb= problem.MakeJacobians()
+  KKT      = problem.MakeReducedKKTMatrix( coo=False )
+  Sigma, W = problem.MakeSigmaAndWeightMatrix()
+  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
+  problem.UpdateJacobian()
+  problem.UpdateResidual()
+  op_A_inv = CholeskyOperator(KKT)
 
+  b = np.zeros( len(res)+len(xc) )
+  seg_lambda = slice(0, len(res))
+  seg_dx     = slice(len(res), None)
+  le  = lc - l0
   for it in range(maxit):
-    problem.UpdateJacobian()
-    problem.UpdateResidual()
-    le  = lc - l0
-    print np.linalg.norm(res), np.linalg.norm(le)
+    print np.linalg.norm(res), le.dot(W*le)
+    b[seg_lambda]  = B * le - res
 
-    cg  = le - res
-    ATW = Ja.T * W
-    ATWA= ATW * Ja
-    dx  = scipy.sparse.linalg.spsolve(ATWA, ATW * cg)
-    lag = W * (Ja * dx - cg)
-    dl  = Sigma * lag  + le
+    s   = op_A_inv * b
+    dx  = s[seg_dx]
+    lag = -s[seg_lambda]
+    dl = Sigma * (B.T * lag) + le
+
     lc -= dl
     xc += dx
+    le  = lc - l0
+
+    if np.abs(dx).max() < 1e-6:
+      break
+
+    problem.UpdateJacobian()
+    op_A_inv.UpdataFactor(KKT)
+    problem.UpdateResidual()
+
   return xc, lc - l0
 #%%
 def EqualityConstraint(a,b):
@@ -1240,6 +1253,45 @@ def test_ProblemJacobian():
 
   print "test_ProblemJacobian passed"
 
+def test_ProblemMakeKKT():
+  def DumpXLConstraint(x,l):
+    return 0.5*x.dot(x) + 0.5*l.dot(l)
+  problem = GaussHelmertProblem()
+  x = np.ones(2)
+  l = np.full(2, 2.)
+  problem.AddConstraintUsingAD(DumpXLConstraint, [x], [l])
+  problem.SetSigma(l, 0.5*np.ones(2))
+
+  res  = problem.CompoundResidual()
+  xc   = problem.CompoundParameters()
+  lc   = problem.CompoundObservation()
+
+  KKT      = problem.MakeReducedKKTMatrix( coo=False )
+  Sigma, W = problem.MakeSigmaAndWeightMatrix()
+  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
+
+  lc[:] = np.arange(2)
+  xc[:] = 2+np.arange(2)
+  problem.UpdateJacobian()
+  problem.UpdateResidual()
+  assert_array_equal( B.A, [np.arange(2)] )
+  assert_array_equal(KKT.A,
+                    [[ 0.5,  2. ,  3. ],
+                     [ 2. ,  0. ,  0. ],
+                     [ 3. ,  0. ,  0. ]])
+  assert_equal(7, res)
+
+  lc[:] += 1
+  xc[:] += 1
+  problem.UpdateJacobian()
+  problem.UpdateResidual()
+  assert_array_equal( B.A, [np.arange(2)+1] )
+  assert_array_equal(KKT.A,
+                    [[ 2.5,  3. ,  4. ],
+                     [ 3. ,  0. ,  0. ],
+                     [ 4. ,  0. ,  0. ]])
+  assert_equal(15, res)
+  print "test_ProblemMakeKKT passed"
 
 #%%
 if __name__ == '__main__':
@@ -1253,59 +1305,25 @@ if __name__ == '__main__':
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
+  test_ProblemMakeKKT()
 
-  dim_x, num_x = 3, 1
-  dim_l, num_l = 4, 3*num_x
+  dim_x = 3
+  dim_l, num_l = 3, 100
 
-  dim_g = 3
-  A = np.random.rand(dim_g, dim_x)
-  B = np.random.rand(dim_g, dim_l)
-  AffineConstraint = MakeAffineConstraint(A,B)
+  A = np.random.rand(dim_l, dim_x)
+  def LinearConstraint(x, l):
+    return A.dot(x) - l
 
-  x = np.ones((num_x, dim_x))
-  l = [ np.zeros((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+  x = np.random.rand(dim_x)
+  l = A.dot(x) + 0.5*np.random.rand(num_l, dim_l)
+
+  sigma = np.full(dim_l, 0.5**2)
 
   problem = GaussHelmertProblem()
-  for i in range(num_x):
-    for j in range(num_l/num_x):
-      problem.AddConstraintUsingAD(AffineConstraint,
-                                   [ x[i] ],
-                                   [ l[i][j] ])
-      problem.SetSigma(l[i][j], 0.5*np.ones(dim_l))
-  dims = problem.dims
-  total_dim = sum(dims)
-  res  = problem.CompoundResidual()
-  xc   = problem.CompoundParameters()
-  lc   = problem.CompoundObservation()
-  l0   = lc.copy()
-  KKT  = problem.MakeReducedKKTMatrix( coo=False )
-  Sig,W = problem.MakeSigmaAndWeightMatrix()
-  problem.UpdateJacobian()
-  KKT.A
-#  op = CholeskyOperator(KKT)
-#  Ja,Jb = problem.MakeJacobians()
-
-#  kkt  = problem.MakeKKTMatrix()
-#  segment_x, segment_l, segment_r = problem.MakeKKTSegmentSlice()
-##  a = kkt.A
-#  problem.UpdateJacobian()
-#  op = CoordLinearOperator(problem.mat_kkt.data,
-#                           problem.mat_kkt.row,
-#                           problem.mat_kkt.col,
-#                           total_dim, total_dim,
-#                           symmetric=True)
-#  b = np.zeros(sum(dims))
-#  for it in range(1):
-#    problem.UpdateJacobian()
-#    problem.UpdateResidual()
-##    op.UpdataFactor(kkt)
-#
-#    e = lc - l0
-#    b[segment_l] = -e
-#    b[segment_r] = -res
-#
-##    xc += s[segment_x]
-##    lc += s[segment_l]
-#    print np.linalg.norm(res), np.linalg.norm(e)
-
-
+  for i in range(num_l):
+    problem.AddConstraintUsingAD(LinearConstraint,
+                                 [ x ],
+                                 [ l[i] ])
+    problem.SetSigma(l[i], sigma)
+  x_est, e  = SolverByKKT(problem)
+  print x,x_est
