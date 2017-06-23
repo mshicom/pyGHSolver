@@ -801,11 +801,11 @@ class CompoundVector(object):
   def NewSegment(self, dim):
     """ Make new segment on the tail """
     head = self.tail
-    seg = np.ndarray(shape  = (dim,),
+    array = np.ndarray(shape  = (dim,),
                      buffer = self.buff,
                      offset = head*8 )  # 8 for double size
     self.tail += dim
-    return head, seg
+    return head, array
 
   @property
   def flat(self):
@@ -835,7 +835,7 @@ class CompoundVectorWithDict(CompoundVector):
 
   def FindVector(self, vector):
     key = ArrayID(vector)
-    return  self.array_dict.get(key, None)
+    return  self.array_dict.get(key, (None,None))
 
   def OverWriteOrigin(self):
     for dst, seg in self.array_dict.iteritems():
@@ -892,7 +892,7 @@ def test_CompoundVector():
 
   # CompoundVectorWithMapping
   cvm = CompoundVectorWithMapping()
-  cv = CompoundVectorWithDict()
+  cv  = CompoundVectorWithDict()
 
   vs = np.random.rand(4,4)
   def op_double(src):
@@ -908,61 +908,118 @@ def test_CompoundVector():
 
 
 #%% GaussHelmertProblem
+class VariableBlock(object):
+  __slots__ = 'array', 'dim', 'isfixed', 'param', 'jac'
+  def __init__(self, array):
+    self.array = array
+    self.dim   = len(array)
+    self.isfixed = False
+    self.param = None
+    self.jac = []
+
+class ObservationBlock(VariableBlock):
+  __slots__ = 'sigma'
+  def __init__(self, array):
+    super(ObservationBlock, self).__init__(array)
+    self.sigma = None
 
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
-  VariableBlock   = namedtuple('VariableBlock'   , ['seg', 'seg_param', 'param'])
-  ObservationBlock= namedtuple('ObservationBlock', ['seg', 'seg_param', 'param', 'mat_sig_id'])
+#  VariableBlock   = namedtuple('VariableBlock'   , ['array', 'dim', 'isfixed', 'param', 'jac'])
+#  ObservationBlock= namedtuple('ObservationBlock', ['array', 'dim', 'isfixed', 'param', 'jac', 'sigma'])
 
   def __init__(self):
-    self.cv_x   = CompoundVectorWithDictAndCallback()
-    self.cv_l   = CompoundVectorWithDictAndCallback()
+    self.cv_x   = CompoundVectorWithDict()
+    self.cv_l   = CompoundVectorWithDict()
     self.cv_res = CompoundVector()
 
-    self.mat_sigma     = SparseBlock()
-    self.mat_jac_x = SparseBlock()
-    self.mat_jac_l = SparseBlock()
+    self.mat_sigma = None
+    self.mat_jac_x = None
+    self.mat_jac_l = None
 
     self.Jx, self.Jl, self.Sigma, self.W = None,None,None,None
 
     self.constraint_blocks = []    # list of ConstraintBlock
     self.variance_factor = -1.0
 
-    self.dict_parameter_block = {}
-    self.dict_observation_block = {}
+    self.dict_parameter_block = OrderedDict()
+    self.dict_observation_block = OrderedDict()
 
   def AddParameter(self, x_list):
-    x_off, x_vec = [],[]
+    blocks = []
     for x in x_list:
-      offset, seg = self.cv_x.AddVector(x)
-      x_off.append(offset)
-      x_vec.append(seg)
+      offset, array = self.cv_x.AddVector(x)
 
-      if not offset in self.dict_parameter_block:
-        item = GaussHelmertProblem.VariableBlock(seg, None, None )
-        self.dict_parameter_block[offset] = item
-    return x_off, x_vec
+      obj = self.dict_parameter_block.get(offset, None)
+      if obj is None:
+        obj = VariableBlock(array)
+        self.dict_parameter_block[offset] = obj
+      blocks.append(obj)
+    return blocks
 
   def AddObservation(self, l_list):
-    l_off, l_vec = [],[]
+    blocks = []
     for l in l_list:
-      offset, seg = self.cv_l.AddVector(l)
-      l_off.append(offset)
-      l_vec.append(seg)
+      offset, array = self.cv_l.AddVector(l)
 
-      if not offset in self.dict_observation_block:
-        dim_l = len(l)
-        mat_sig_id = self.mat_sigma.NewDenseMatrix(offset, offset, (dim_l,)*2)
-        self.mat_sigma.PutDenseMatrix(mat_sig_id, np.eye(dim_l))
+      obj = self.dict_observation_block.get(offset, None)
+      if obj is None:
+        obj = ObservationBlock(array)
+        self.dict_observation_block[offset] = obj
+      blocks.append(obj)
+    return blocks
 
-        item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_sig_id )
-        self.dict_observation_block[offset] = item
-    return l_off, l_vec
+  def SetVarFixed(self, array):
+    id, _ = self.cv_x.FindVector(array)
+    if id in self.dict_parameter_block:
+      self.dict_parameter_block[id].isfixed = True
+      return
 
-  def Plus_x(self, x, delta):
-    for item in self.dict_variable_block.itervalues():
-      item.seg[:] = var.param.Plus( x[var.place], delta[ var.place_local ] )
-    return x
+    id, _ = self.cv_l.FindVector(array)
+    if id in self.dict_observation_block:
+      self.dict_observation_block[id].isfixed = True
+      return
+    raise ValueError("array not found")
+
+  def SetSigma(self, array, sigma):
+    id, _ = self.cv_l.FindVector(array)
+    if id in self.dict_observation_block:
+      self.dict_observation_block[id].sigma = sigma
+      return
+    raise ValueError("array not found")
+
+  def SetUp(self):
+    """ reset everything"""
+    self.mat_sigma = SparseBlock()
+    self.mat_jac_x = SparseBlock()
+    self.mat_jac_l = SparseBlock()
+    self.cv_dx  = CompoundVectorWithMapping()
+    self.cv_dl  = CompoundVectorWithMapping()
+
+    for x in self.dict_parameter_block.values(): #array, dim, isfixed, param
+      if x.isfixed:
+        continue  # ignore fixed
+
+      """1. dx vector, its pos"""
+      dx_offset, dx_array = self.cv_dx.AddMaping(x.dim, x.array)
+      """2. jacobian at that pos"""
+      for dm in x.jac:
+        dm.c = dx_offset
+        self.mat_jac_x.AddElement(dm)
+
+    for l in self.dict_observation_block.values(): #array, dim, isfixed, param
+      if l.isfixed:
+        continue  # ignore fixed
+
+      dl_offset, dl_array = self.cv_dl.AddMaping(l.dim, l.array)
+      for dm in l.jac:
+        dm.c = dl_offset
+        self.mat_jac_l.AddElement(dm)
+
+      """3. sigma at that pos"""
+      dm = DenseMatrix(dl_offset, dl_offset, (l.dim, l.dim))
+      dm.Write( np.eye(l.dim) if l.sigma is None else l.sigma )
+      self.mat_sigma.AddElement(dm)
 
 
   def AddConstraintUsingAD(self, g, x_list, l_list):
@@ -984,15 +1041,17 @@ class GaussHelmertProblem(object):
     dim_res = len(res)
 
     """ 2. Assign poses and mapped vectors for input parameter/observation arrays"""
-    x_off, x_vec = self.AddParameter(x_list)
-    l_off, l_vec = self.AddObservation(l_list)
-    xl_vec = x_vec + l_vec
+    x_blocks = self.AddParameter(x_list)
+    l_blocks = self.AddObservation(l_list)
+    xl_vec = [ b.array for b in x_blocks+l_blocks ]
 
     """ 3. Compound vector for constraint residual """
     res_off, res_vec = self.cv_res.NewSegment(dim_res)
-
-    jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
-    jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
+    dms = []
+    for b in x_blocks + l_blocks:  #'array', 'dim', 'isfixed', 'param', 'jac'
+      new_dm = DenseMatrix(res_off, 0, (dim_res, b.dim) )
+      b.jac.append( new_dm )
+      dms.append( new_dm )
 
     """ 4. Generate constraint functor that use the mapped vectors """
     def g_res():
@@ -1002,11 +1061,8 @@ class GaussHelmertProblem(object):
       J = var_jacobian( np.hstack(xl_vec) )
       jac = np.split(J, xl_indices, axis=1)
       jac.reverse() # reversed, to pop(-1) instead of pop(0)
-      for submat_id in jac_submat_id_x:
-        self.mat_jac_x.PutDenseMatrix( submat_id, jac.pop() )
-
-      for submat_id in jac_submat_id_l:
-        self.mat_jac_l.PutDenseMatrix( submat_id, jac.pop() )
+      for dm in dms:
+        dm.Write( jac.pop() )
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
@@ -1016,15 +1072,15 @@ class GaussHelmertProblem(object):
       block = self.dict_parameter_block.get(x, None)
       if block is None:
         raise RuntimeError("wrong id")
-      x_vec.append(block.seg)
-      x_sizes.append(len(block.seg))
+      x_vec.append(block.array)
+      x_sizes.append(len(block.array))
 
     for l in l_off:
       block = self.dict_observation_block.get(l, None)
       if block is None:
         raise RuntimeError("wrong id")
-      l_vec.append(block.seg)
-      l_sizes.append(len(block.seg))
+      l_vec.append(block.array)
+      l_sizes.append(len(block.array))
 
     xl_vec = x_vec + l_vec
 
@@ -1063,35 +1119,6 @@ class GaussHelmertProblem(object):
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
-  def SetSigma(self, array, sigma):
-    if not isinstance(array, list):
-      array = [array]
-    if not isinstance(sigma, list):
-      sigma = [sigma]*len(array)
-    elif len(sigma) != array:
-      raise ValueError("number don't match")
-
-    for ar, si in zip(array, sigma):
-      if np.isscalar(ar):
-        l_off = ar
-      else:
-        l_off, _ = self.cv_l.FindVector(ar)
-      if not l_off is None:
-        if len(si.shape) == 1:
-          si = np.diag(si)
-        self.mat_sigma.PutDenseMatrix( self.dict_observation_block[l_off].mat_sig_id, si)
-
-
-  def SetParameterization(self, array, parameterization):
-    var = VariableBlock(array)
-    if var in self.parameter_dict:
-      self.parameter_dict[var].param = parameterization
-    elif var in self.observation_dict:
-      self.observation_dict[var].param = parameterization
-    else:
-      raise RuntimeWarning("Input variable not in the lists")
-
-
 
   def CompoundParameters(self):
     return self.cv_x.flat
@@ -1119,12 +1146,16 @@ class GaussHelmertProblem(object):
     return [self.dim_x, self.dim_l, self.dim_res ]
 
   def MakeJacobians(self,**kwarg):
+    if self.mat_jac_l is None:
+      self.SetUp()
     self.Jx = self.mat_jac_x.BuildSparseMatrix(**kwarg)
     self.Jl = self.mat_jac_l.BuildSparseMatrix(**kwarg)
 
     return self.Jx, self.Jl
 
   def MakeReducedKKTMatrix(self, *args, **kwarg):
+    if self.mat_jac_l is None:
+      self.SetUp()
     dim_x, dim_res = self.dim_x,  self.dim_res
     dim_total = dim_x + dim_res
 
@@ -1137,6 +1168,9 @@ class GaussHelmertProblem(object):
     return MakeSymmetric(mat_kkt).BuildSparseMatrix((dim_total, dim_total),**kwarg)
 
   def MakeSigmaAndWeightMatrix(self, **kwarg):
+    if self.mat_sigma is None:
+      self.SetUp()
+
     self.mat_w = MakeBlockInv(self.mat_sigma)
     self.Sigma = self.mat_sigma.BuildSparseMatrix(**kwarg)
 
@@ -1260,7 +1294,7 @@ def HorizontalRepeat(M, repeats):
 
 def test_ProblemJacobian():
   dim_x, num_x = 3, 2
-  dim_l, num_l = 4, 10*num_x
+  dim_l, num_l = 4, 30*num_x
 
   dim_g = 3
   A = np.random.rand(dim_g, dim_x)
@@ -1276,7 +1310,8 @@ def test_ProblemJacobian():
       problem.AddConstraintUsingAD(AffineConstraint,
                                    [ x[i] ],
                                    [ l[i][j] ])
-      problem.SetSigma(l[i][j], sigma)
+      problem.SetSigma(l[i][j], np.diag(sigma))
+  problem.SetUp()
 
   # res compound
   dim_res = dim_g * num_l
@@ -1315,18 +1350,53 @@ def test_ProblemJacobian():
   Sig, W = problem.MakeSigmaAndWeightMatrix()
   assert_array_equal(Sig.todense(), DiagonalRepeat(np.diag(sigma), num_l) )
   assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
+  print "test_ProblemJacobian passed"
 
-  # 2 method
+def test_ProblemFixed():
+  dim_x, num_x = 3, 2
+  dim_l, num_l = 4, 3*num_x
+
+  dim_g = 3
+  dim_res = dim_g * num_l
+
+  A = np.random.rand(dim_g, dim_x)
+  B = np.random.rand(dim_g, dim_l)
+  AffineConstraint = MakeAffineConstraint(A,B)
+
+  x = np.zeros((num_x, dim_x))
+  l = [ np.ones((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+  sigma = np.full(dim_l, 0.5)
   problem = GaussHelmertProblem()
   for i in range(num_x):
     for j in range(num_l/num_x):
-      x_off, _ = problem.AddParameter( [ x[i] ] )
-      l_off, _ = problem.AddObservation( [ l[i][j] ] )
+      problem.AddConstraintUsingAD(AffineConstraint,
+                                   [ x[i] ],
+                                   [ l[i][j] ])
+      problem.SetSigma(l[i][j], np.diag(sigma))
 
-      problem.AddConstraintWithKnownBlocks(AffineConstraint, x_off, l_off)
-      problem.SetSigma(l_off, sigma)
+  problem.SetVarFixed(x[0])
+  problem.SetVarFixed(l[0][0])
 
-  print "test_ProblemJacobian passed"
+  problem.SetUp()
+
+  # fix
+  Jx,Jl = problem.MakeJacobians()
+  assert_equal( Jx.shape, (dim_res, dim_x*(num_x-1)) )
+  assert_equal( Jl.shape, (dim_res, dim_l*(num_l-1)) )
+
+
+  # 2 method
+#  problem = GaussHelmertProblem()
+#  for i in range(num_x):
+#    for j in range(num_l/num_x):
+#      x_off, _ = problem.AddParameter( [ x[i] ] )
+#      l_off, _ = problem.AddObservation( [ l[i][j] ] )
+#
+#      problem.AddConstraintWithKnownBlocks(AffineConstraint, x_off, l_off)
+#      problem.SetSigma(l_off, sigma)
+  print "test_ProblemFixed passed"
+
+
 
 def test_ProblemMakeKKT():
   def DumpXLConstraint(x,l):
@@ -1335,8 +1405,8 @@ def test_ProblemMakeKKT():
   x = np.ones(2)
   l = np.full(2, 2.)
   problem.AddConstraintUsingAD(DumpXLConstraint, [x], [l])
-  problem.SetSigma(l, 0.5*np.ones(2))
-
+  problem.SetSigma(l, 0.5*np.eye(2))
+  problem.SetUp()
   res  = problem.CompoundResidual()
   xc   = problem.CompoundParameters()
   lc   = problem.CompoundObservation()
@@ -1407,8 +1477,9 @@ if __name__ == '__main__':
 
   test_ArrayID()
   test_CompoundVector()
-#  test_ProblemJacobian()
-#  test_ProblemMakeKKT()
+  test_ProblemJacobian()
+  test_ProblemFixed()
+  test_ProblemMakeKKT()
 
   if 0:
     dim_x = 3
@@ -1428,7 +1499,7 @@ if __name__ == '__main__':
       problem.AddConstraintUsingAD(LinearConstraint,
                                    [ x ],
                                    [ l[i] ])
-      problem.SetSigma(l[i], sigma)
+      problem.SetSigma(l[i], np.diag(sigma))
 
     x_est, e  = SolveWithCVX(problem)
 
