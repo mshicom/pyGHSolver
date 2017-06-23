@@ -8,6 +8,7 @@ Created on Fri Apr 28 10:08:11 2017
 import numpy as np
 import scipy
 import scipy.sparse
+import scipy.sparse.linalg
 
 from collections import namedtuple
 np.set_printoptions(precision=4, linewidth=120)
@@ -365,12 +366,15 @@ def test_MatrixTreeNode():
   print "test_MatrixTreeNode passed"
 
 #%%
-def _make_tranpose_callback(dst_block):
-  def WriteTranspose(obj, array):
-    dst_block.Write(array.T)
-  return WriteTranspose
+
 
 def MakeSymmetric(obj):
+
+  def _make_tranpose_callback(dst_block):
+    def WriteTranspose(obj, array):
+      dst_block.Write(array.T)
+    return WriteTranspose
+
   def _recursive_routine(src, parent):
     """ The parent do nothing but mirror their off-diagonal(in absolute pos) children """
     for e in copy(src.elements):  # use copy to ignore new attached element
@@ -399,7 +403,7 @@ def MakeSymmetric(obj):
           next_parent = src
         """ recursion magic """
         _recursive_routine(e, next_parent)
-
+  """ func body """
   obj.PropogateAbsolutePos()
   _recursive_routine(obj, obj)
   return obj
@@ -448,34 +452,34 @@ def test_MakeSymmetric():
   print "test_MakeSymmetric passed"
 #%%
 from collections import defaultdict,OrderedDict
-
-def _make_AB_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b):
-  op_a, op_b = OrderedDict(), OrderedDict()
-  for dm_a_, dm_b_ in zip(src_dm_a, src_dm_b):
-    op_a[dm_a_] = None
-    op_b[dm_b_] = None
-
-  def CalculateSumOfAB(obj, array):
-    # 1. record the incoming data
-    if obj in op_a:
-      op_a[obj] = array
-    elif obj in op_b:
-      op_b[obj] = array
-    else:
-      raise RuntimeError("called by wrong object")
-    # 2. do calculation once all data are ready
-    if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
-      new_data = np.zeros(dst_block_shape)
-      for mat_a, mat_b in zip(op_a.values(), op_b.values()):
-        new_data += mat_a.dot(mat_b)
-      dst_block.Write( new_data )
-      # 3. reset the dict to all None
-#      for op in [op_a, op_b]:
-#        for key in op.keys():
-#          op[key] = None
-  return CalculateSumOfAB
-
 def MakeAB(A, B, r=0, c=0):
+
+  def _make_AB_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b):
+    op_a, op_b = OrderedDict(), OrderedDict()
+    for dm_a_, dm_b_ in zip(src_dm_a, src_dm_b):
+      op_a[dm_a_] = None
+      op_b[dm_b_] = None
+
+    def CalculateSumOfAB(obj, array):
+      # 1. record the incoming data
+      if obj in op_a:
+        op_a[obj] = array
+      elif obj in op_b:
+        op_b[obj] = array
+      else:
+        raise RuntimeError("called by wrong object")
+      # 2. do calculation once all data are ready
+      if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
+        new_data = np.zeros(dst_block_shape)
+        for mat_a, mat_b in zip(op_a.values(), op_b.values()):
+          new_data += mat_a.dot(mat_b)
+        dst_block.Write( new_data )
+        # 3. reset the dict to all None
+  #      for op in [op_a, op_b]:
+  #        for key in op.keys():
+  #          op[key] = None
+    return CalculateSumOfAB
+  """ func body """
   AB = SparseBlock(r, c)
 
   """ 1. collect dense matrix"""
@@ -561,63 +565,66 @@ def test_MakeAB():
                      [  3.,  16.,  16.,   9.,   9.,   9.]])
   print "test_MakeAB passed "
 
-def _make_AWAT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_w):
-  op_a, op_w = OrderedDict(), OrderedDict()
-  for dm_a_, dm_w_ in zip(src_dm_a, src_dm_w):
-    op_a[dm_a_] = None
-    op_w[dm_w_] = None
-
-  def CalculateSumOfAWAT(obj, array):
-    # 1. record the incoming data
-    if obj in op_a:
-      op_a[obj] = array.copy()
-    elif obj in op_w:
-      op_w[obj] = array.copy()
-    else:
-      raise RuntimeError("called by wrong object")
-    # 2. do calculation once all data are ready
-    if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
-#      print "All element collected"
-      new_data = np.zeros(dst_block_shape)
-      for mat_a, mat_w in zip(op_a.values(), op_w.values()):
-        new_data += mat_a.dot(mat_w).dot(mat_a.T)
-      dst_block.Write( new_data )
-      # 3. reset the dict to all None, except op_w which is usually constant
-      for key in op_a.keys():
-        op_a[key] = None
-  return CalculateSumOfAWAT
-
-def _make_AWBT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b, src_dm_w):
-  op_a, op_b, op_w = OrderedDict(), OrderedDict(), OrderedDict()
-  for dm_a_, dm_b_, dm_w_ in zip(src_dm_a, src_dm_b, src_dm_w):
-    op_a[dm_a_] = None
-    op_b[dm_b_] = None
-    op_w[dm_w_] = None
-
-  def CalculateSumOfAWBT(obj, array):
-    # 1. record the incoming data
-    if obj in op_a:
-      op_a[obj] = array.copy()
-    elif obj in op_b:
-      op_b[obj] = array.copy()
-    elif obj in op_w:
-      op_w[obj] = array.copy()
-    else:
-      raise RuntimeError("called by wrong object")
-    # 2. do calculation once all data are ready
-    if not np.any( [op is None for op in chain(op_a.values(),op_b.values(),op_w.values())] ):
-      print "All element collected"
-      new_data = np.zeros(dst_block_shape)
-      for mat_a, mat_b, mat_w in zip(op_a.values(), op_b.values(),op_w.values()):
-        new_data += mat_a.dot(mat_w).dot(mat_b.T)
-      dst_block.Write( new_data )
-      # 3. reset the dict to all None
-      for op in [op_a, op_b]:
-        for key in op.keys():
-          op[key] = None
-  return CalculateSumOfAWBT
 
 def MakeAWAT(A, W, make_full=True, r=0, c=0):
+  def _make_AWAT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_w):
+    op_a, op_w = OrderedDict(), OrderedDict()
+    for dm_a_, dm_w_ in zip(src_dm_a, src_dm_w):
+      op_a[dm_a_] = None
+      op_w[dm_w_] = None
+
+    def CalculateSumOfAWAT(obj, array):
+      # 1. record the incoming data
+      if obj in op_a:
+        op_a[obj] = array.copy()
+      elif obj in op_w:
+        op_w[obj] = array.copy()
+      else:
+        raise RuntimeError("called by wrong object")
+      # 2. do calculation once all data are ready
+      if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
+  #      print "All element collected"
+        new_data = np.zeros(dst_block_shape)
+        for mat_a, mat_w in zip(op_a.values(), op_w.values()):
+          new_data += mat_a.dot(mat_w).dot(mat_a.T)
+        dst_block.Write( new_data )
+        # 3. reset the dict to all None, except op_w which is usually constant
+        for key in op_a.keys():
+          op_a[key] = None
+    return CalculateSumOfAWAT
+
+  def _make_AWBT_callback(dst_block, dst_block_shape, src_dm_a, src_dm_b, src_dm_w):
+    op_a, op_b, op_w = OrderedDict(), OrderedDict(), OrderedDict()
+    for dm_a_, dm_b_, dm_w_ in zip(src_dm_a, src_dm_b, src_dm_w):
+      op_a[dm_a_] = None
+      op_b[dm_b_] = None
+      op_w[dm_w_] = None
+
+    def CalculateSumOfAWBT(obj, array):
+      # 1. record the incoming data
+      if obj in op_a:
+        op_a[obj] = array.copy()
+      elif obj in op_b:
+        op_b[obj] = array.copy()
+      elif obj in op_w:
+        op_w[obj] = array.copy()
+      else:
+        raise RuntimeError("called by wrong object")
+      # 2. do calculation once all data are ready
+      if not np.any( [op is None for op in chain(op_a.values(),op_b.values(),op_w.values())] ):
+  #      print "All element collected"
+        new_data = np.zeros(dst_block_shape)
+        for mat_a, mat_b, mat_w in zip(op_a.values(), op_b.values(),op_w.values()):
+          new_data += mat_a.dot(mat_w).dot(mat_b.T)
+        dst_block.Write( new_data )
+        # 3. reset the dict to all None
+        for op in [op_a, op_b]:
+          for key in op.keys():
+            op[key] = None
+    return CalculateSumOfAWBT
+
+  """ func body """
+
   ret = SparseBlock(r, c)
 
   """ 1. collect dense matrix and sperate mat in different row"""
@@ -720,12 +727,14 @@ def test_MakeAWAT():
   print "test_MakeAWAT passed"
 
 
-def _make_inv_callback(dst_block):
-  def WriteInv(obj, array):
-    dst_block.Write(np.linalg.inv(array))
-  return WriteInv
+
 
 def MakeBlockInv(other):
+  def _make_inv_callback(dst_block):
+    def WriteInv(obj, array):
+      dst_block.Write(np.linalg.inv(array))
+    return WriteInv
+  """ func body """
   ret  = SparseBlock()
   other.PropogateAbsolutePos()
   for dm in other(DenseMatrix):
@@ -1129,15 +1138,22 @@ class KKTSolve(object):
   def __init__(self, problem):
     self.problem = problem
     self.l0      = problem.CompoundObservation().copy()
-    self.KKT     = problem.MakeReducedKKTMatrix( coo=False )
+    self.KKT     = problem.MakeReducedKKTMatrix( coo=True )
+    self.KKT_op  = CoordLinearOperator(self.KKT.data,
+                                       self.KKT.row,
+                                       self.KKT.col,
+                                       self.KKT.shape[1],
+                                       self.KKT.shape[0])
     self.Sigma, self.W = problem.MakeSigmaAndWeightMatrix()
     self.B       = problem.mat_jac_l.BuildSparseMatrix( coo=False )
     problem.UpdateJacobian()
     problem.UpdateResidual()
+#    self.cg = Minres(self.KKT_op)
     try:
-      self.op_A_inv = CholeskyOperator(self.KKT)
-    except:
+#      self.op_A_inv = CholeskyOperator(self.KKT)
       pass
+    except:
+      print "Cholesky failed"
 
   def Solve(self, maxit = 20):
     res  = self.problem.CompoundResidual()
@@ -1149,11 +1165,15 @@ class KKTSolve(object):
     seg_dx     = slice(len(res), None)
 
     le  = lc - self.l0
+    s = np.zeros_like(b)
     for it in range(maxit):
       print np.linalg.norm(res), le.dot(self.W*le)
       b[seg_lambda]  = self.B * le - res
-
-      s   = self.op_A_inv * b
+      s[seg_dx] = 0
+      s = scipy.sparse.linalg.minres(self.KKT, b)[0]
+#      self.cg.solve(b,show=False)
+#      s = self.cg.x
+#      s   = self.op_A_inv * b
       dx  = s[seg_dx]
       lag = -s[seg_lambda]
       dl = self.Sigma * (self.B.T * lag) + le
@@ -1166,7 +1186,7 @@ class KKTSolve(object):
         break
 
       self.problem.UpdateJacobian()
-      self.op_A_inv.UpdataFactor(self.KKT)
+#      self.op_A_inv.UpdataFactor(self.KKT)
       self.problem.UpdateResidual()
 
     return xc, le
@@ -1300,6 +1320,34 @@ def test_ProblemMakeKKT():
   assert_equal(15, res)
   print "test_ProblemMakeKKT passed"
 
+from cvxopt import matrix,spmatrix
+from cvxopt import solvers
+def SolveWithCVX(problem):
+  res  = problem.CompoundResidual()
+  lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+  l0   = lc.copy()
+
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=True)
+  Ja,Jb = problem.MakeJacobians(coo=True)
+  Sigma = problem.mat_sigma.BuildSparseMatrix(coo=True)
+  b   = matrix(np.zeros((problem.dim_x, 1), 'd'))
+  for it in range(10):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+    le  = lc - l0
+    print np.linalg.norm(res),np.linalg.norm(le)
+
+    P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
+    q   = matrix(res-Jb*le)
+    at  = spmatrix(Ja.data, Ja.col, Ja.row)     # transpose
+    sol = solvers.qp(P,q, A=at, b=b )
+    lag = -np.array(sol['x']).ravel()
+    dx  = np.array(sol['y']).ravel()
+    dl  = Sigma * (lag * Jb) + le  # Jb.T * lag
+    xc  += dx
+    lc  -= dl
+  return xc, lc - l0
 #%%
 if __name__ == '__main__':
 
@@ -1315,7 +1363,7 @@ if __name__ == '__main__':
   test_ProblemMakeKKT()
 
   dim_x = 3
-  dim_l, num_l = 3, 100
+  dim_l, num_l = 3, 10
 
   A = np.random.rand(dim_l, dim_x)
   def LinearConstraint(x, l):
@@ -1332,5 +1380,8 @@ if __name__ == '__main__':
                                  [ x ],
                                  [ l[i] ])
     problem.SetSigma(l[i], sigma)
-  x_est, e  = KKTSolve(problem).Solve()
+
+  x_est, e  = SolveWithCVX(problem)
+
+#  x_est, e  = KKTSolve(problem).Solve()
   print x,x_est
