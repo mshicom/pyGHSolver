@@ -798,7 +798,7 @@ class CompoundVector(object):
     self.buff = np.empty(capacity)
     self.tail = 0
 
-  def MakeVector(self, dim):
+  def NewSegment(self, dim):
     """ Make new segment on the tail """
     head = self.tail
     seg = np.ndarray(shape  = (dim,),
@@ -811,40 +811,63 @@ class CompoundVector(object):
   def flat(self):
     return np.ndarray((self.tail,), buffer=self.buff)
 
+
 class CompoundVectorWithDict(CompoundVector):
+  Segment = namedtuple('Segment', ['offset', 'array'])
+
   def __init__(self, cap = 100000):
-    self.vec_dict = {}
+    self.array_dict = {}
     super(CompoundVectorWithDict, self).__init__(cap)
 
   def AddVector(self, vector):
     """ 1. check whether it is a newcomer, use address as hash"""
     key = ArrayID(vector)
-    if key not in self.vec_dict:
+    if key not in self.array_dict:
       """ 2. Make new segment on the tail """
-      new_item = self.MakeVector(len(vector))
-      new_item[1][:] = vector      # copy inital value
-      self.vec_dict[key] = new_item
-      return new_item
+      dim = len(vector)
+      offset, array = self.NewSegment(dim)
+      array[:] = vector # copy inital value
+      new_seg = CompoundVectorWithDict.Segment(offset, array)
+      self.array_dict[key] = new_seg
+      return new_seg
     else:
-      return self.vec_dict[key]
+      return self.array_dict[key]
 
   def FindVector(self, vector):
     key = ArrayID(vector)
-    return  self.vec_dict.get(key, (None,None))
+    return  self.array_dict.get(key, None)
 
   def OverWriteOrigin(self):
-    for dst, (_, src) in self.vec_dict.iteritems():
-      dst.data[:] = src
+    for dst, seg in self.array_dict.iteritems():
+      dst.data[:] = seg.array
 
-  @property
-  def flat(self):
-    return np.ndarray((self.tail,), buffer=self.buff)
+class CompoundVectorWithMapping(CompoundVector):
+  Segment = namedtuple('Segment', ['offset', 'src_array', 'dst_array', 'op'])
+
+  def __init__(self, cap = 100000):
+    self.segments = []
+    super(CompoundVectorWithMapping, self).__init__(cap)
+
+  def AddMaping(self, src_dim, dst_array, op=None):
+    """ 1. Make new segment on the tail """
+    offset, src_array = self.NewSegment(src_dim)
+    new_seg = CompoundVectorWithMapping.Segment(offset, src_array, dst_array, op)
+    self.segments.append(new_seg)
+    return offset, src_dim
+
+  def Flush(self):
+    for seg in self.segments:
+      if seg.op is None:
+        seg.dst_array[:] = seg.src_array
+      else:
+        seg.dst_array[:] = seg.op(seg.src_array)
+
 
 def test_CompoundVector():
   vs = np.random.rand(4,4)
   # main function
   cv = CompoundVectorWithDict()
-  offset, seg = zip(*[cv.AddVector(v) for v in vs])
+  offset,seg = zip(*[cv.AddVector(v) for v in vs])[:2]
   assert_array_equal(cv.flat, vs.ravel())
   assert_equal(offset, [0,4,8,12])
 
@@ -862,10 +885,25 @@ def test_CompoundVector():
   assert_equal( vs.ravel(), np.hstack( [np.zeros(4), np.ones(4*3) ]) )
 
   # add duplcate vector
-  offset2, _ = zip(*[cv.AddVector(v) for v in vs])
+  offset2 = zip(*[cv.AddVector(v) for v in vs])[0]
   assert_equal(offset, offset2)
-  offset3, _ = cv.AddVector(  np.empty(1)  )
+  offset3 = cv.AddVector(  np.empty(1)  )[0]
   assert offset3 == 16
+
+  # CompoundVectorWithMapping
+  cvm = CompoundVectorWithMapping()
+  cv = CompoundVectorWithDict()
+
+  vs = np.random.rand(4,4)
+  def op_double(src):
+    return 2*src
+  for i,v in enumerate(vs):
+    dst_offset, dst_array = cv.AddVector(v)
+    src_offset, src_array = cvm.AddMaping(4, dst_array, None if i==0 else op_double)
+  cvm.flat[:] = 1
+  cvm.Flush()
+  assert_array_equal(cv.flat, np.r_[np.ones(4), np.full(12, 2)])
+
   print "test_CompoundVector passed"
 
 
@@ -877,8 +915,8 @@ class GaussHelmertProblem(object):
   ObservationBlock= namedtuple('ObservationBlock', ['seg', 'seg_param', 'param', 'mat_sig_id'])
 
   def __init__(self):
-    self.cv_x   = CompoundVectorWithDict()
-    self.cv_l   = CompoundVectorWithDict()
+    self.cv_x   = CompoundVectorWithDictAndCallback()
+    self.cv_l   = CompoundVectorWithDictAndCallback()
     self.cv_res = CompoundVector()
 
     self.mat_sigma     = SparseBlock()
@@ -890,7 +928,7 @@ class GaussHelmertProblem(object):
     self.constraint_blocks = []    # list of ConstraintBlock
     self.variance_factor = -1.0
 
-    self.dict_variable_block = {}
+    self.dict_parameter_block = {}
     self.dict_observation_block = {}
 
   def AddParameter(self, x_list):
@@ -900,9 +938,9 @@ class GaussHelmertProblem(object):
       x_off.append(offset)
       x_vec.append(seg)
 
-      if not offset in self.dict_variable_block:
+      if not offset in self.dict_parameter_block:
         item = GaussHelmertProblem.VariableBlock(seg, None, None )
-        self.dict_variable_block[offset] = item
+        self.dict_parameter_block[offset] = item
     return x_off, x_vec
 
   def AddObservation(self, l_list):
@@ -920,6 +958,12 @@ class GaussHelmertProblem(object):
         item = GaussHelmertProblem.ObservationBlock(seg, None, None, mat_sig_id )
         self.dict_observation_block[offset] = item
     return l_off, l_vec
+
+  def Plus_x(self, x, delta):
+    for item in self.dict_variable_block.itervalues():
+      item.seg[:] = var.param.Plus( x[var.place], delta[ var.place_local ] )
+    return x
+
 
   def AddConstraintUsingAD(self, g, x_list, l_list):
     x_sizes = [x.size for x in x_list]
@@ -945,7 +989,7 @@ class GaussHelmertProblem(object):
     xl_vec = x_vec + l_vec
 
     """ 3. Compound vector for constraint residual """
-    res_off, res_vec = self.cv_res.MakeVector(dim_res)
+    res_off, res_vec = self.cv_res.NewSegment(dim_res)
 
     jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
     jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
@@ -969,7 +1013,7 @@ class GaussHelmertProblem(object):
   def AddConstraintWithKnownBlocks(self, g, x_off, l_off):
     x_vec,l_vec,x_sizes,l_sizes = [],[],[],[]
     for x in x_off:
-      block = self.dict_variable_block.get(x, None)
+      block = self.dict_parameter_block.get(x, None)
       if block is None:
         raise RuntimeError("wrong id")
       x_vec.append(block.seg)
@@ -998,7 +1042,7 @@ class GaussHelmertProblem(object):
     dim_res = len(res)
 
     """ 3. Compound vector for constraint residual """
-    res_off, res_vec = self.cv_res.MakeVector(dim_res)
+    res_off, res_vec = self.cv_res.NewSegment(dim_res)
 
     jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
     jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
@@ -1046,6 +1090,8 @@ class GaussHelmertProblem(object):
       self.observation_dict[var].param = parameterization
     else:
       raise RuntimeWarning("Input variable not in the lists")
+
+
 
   def CompoundParameters(self):
     return self.cv_x.flat
@@ -1133,6 +1179,8 @@ class GaussHelmertProblem(object):
 
     if ouput:
       return self.Jx, self.Jl
+
+
 
 class KKTSolve(object):
   def __init__(self, problem):
@@ -1359,29 +1407,30 @@ if __name__ == '__main__':
 
   test_ArrayID()
   test_CompoundVector()
-  test_ProblemJacobian()
-  test_ProblemMakeKKT()
+#  test_ProblemJacobian()
+#  test_ProblemMakeKKT()
 
-  dim_x = 3
-  dim_l, num_l = 3, 10
+  if 0:
+    dim_x = 3
+    dim_l, num_l = 3, 1000
 
-  A = np.random.rand(dim_l, dim_x)
-  def LinearConstraint(x, l):
-    return A.dot(x) - l
+    A = np.random.rand(dim_l, dim_x)
+    def LinearConstraint(x, l):
+      return A.dot(x) - l
 
-  x = np.random.rand(dim_x)
-  l = A.dot(x) + 0.5*np.random.rand(num_l, dim_l)
+    x = np.random.rand(dim_x)
+    l = A.dot(x) + 0.05*np.random.rand(num_l, dim_l)
 
-  sigma = np.full(dim_l, 0.5**2)
+    sigma = np.full(dim_l, 0.05**2)
 
-  problem = GaussHelmertProblem()
-  for i in range(num_l):
-    problem.AddConstraintUsingAD(LinearConstraint,
-                                 [ x ],
-                                 [ l[i] ])
-    problem.SetSigma(l[i], sigma)
+    problem = GaussHelmertProblem()
+    for i in range(num_l):
+      problem.AddConstraintUsingAD(LinearConstraint,
+                                   [ x ],
+                                   [ l[i] ])
+      problem.SetSigma(l[i], sigma)
 
-  x_est, e  = SolveWithCVX(problem)
+    x_est, e  = SolveWithCVX(problem)
 
-#  x_est, e  = KKTSolve(problem).Solve()
-  print x,x_est
+  #  x_est, e  = KKTSolve(problem).Solve()
+    print x,x_est
