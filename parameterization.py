@@ -39,7 +39,7 @@ class LocalParameterization(object):
     """
 
   def UpdataJacobian(self, x):
-    self.jacobian = self.ComputeJacobian(x)
+    self.jacobian = self.ComputeJacobian(x).copy()
 
   def ToLocalJacobian(self, Jx):
     """ Return J_delta given J_x.

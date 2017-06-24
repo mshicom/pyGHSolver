@@ -17,9 +17,8 @@ from itertools import chain
 
 from parameterization import *
 import pycppad
-from pykrylov.linop import *
-from pykrylov.minres import Minres
-
+#from pykrylov.linop import *
+#from pykrylov.minres import Minres
 #%% ColumnMajorSparseMatrix
 class LexicalSortable(object):
   def key(self):
@@ -160,22 +159,29 @@ class SparseBlock(MatrixTreeNode):
 
 
 class DenseMatrix(MatrixTreeNode):
-  def __init__(self, r, c, shape):
+  def __init__(self, r, c, shape=None):
     super(DenseMatrix, self).__init__(None, r, c)
 
     self.cache = None
     self.post_callback = []
-    self.shape = shape
-    self._init_element()
+    self.pre_process = None
 
-  def _init_element(self):
-    for seq in xrange(self.shape[1]):
-      self.AddElement(DenseMatrixSegment(self, 0, seq, self.shape[0]))
+    if shape:
+      self.InitElement(shape)
+
+  def InitElement(self, shape):
+    self.shape = shape
+    if self.elements:
+      del self.elements[:]
+    for seq in xrange(shape[1]):
+      self.AddElement(DenseMatrixSegment(self, 0, seq, shape[0]))
 
     self.buf = np.empty(self.shape, order='F').T
 
   def Write(self, array):
-    if self.elements[0].data is None:
+    if self.pre_process:
+      array = self.pre_process(array)
+    if len(self.elements) == 0 or self.elements[0].data is None:
       self.cache = array.copy()
     else:
       for dst, src in zip(self.elements, array.T):
@@ -206,10 +212,11 @@ class DiagonalMatrix(DenseMatrix):  # inherit from DenseMatrix, so that the gath
   def __init__(self, r, c, dim):
     super(DiagonalMatrix, self).__init__(r, c, (dim, dim))
 
-  def _init_element(self):
-    for seq in xrange(self.shape[0]):
+  def InitElement(self, shape):
+    self.shape = shape
+    for seq in xrange(shape[0]):
       self.AddElement(DenseMatrixSegment(self, seq, seq, 1))
-    self.buf = np.empty((self.shape[0],1))
+    self.buf = np.empty((shape[0],1))
 
   def Write(self, array):
     super(DiagonalMatrix, self).Write(array.reshape(1, -1))
@@ -860,7 +867,7 @@ class CompoundVectorWithMapping(CompoundVector):
       if seg.op is None:
         seg.dst_array[:] = seg.src_array
       else:
-        seg.dst_array[:] = seg.op(seg.src_array)
+        seg.dst_array[:] = seg.op(seg.src_array, seg.dst_array)
 
 
 def test_CompoundVector():
@@ -895,7 +902,7 @@ def test_CompoundVector():
   cv  = CompoundVectorWithDict()
 
   vs = np.random.rand(4,4)
-  def op_double(src):
+  def op_double(src, dst):
     return 2*src
   for i,v in enumerate(vs):
     dst_offset, dst_array = cv.AddVector(v)
@@ -988,6 +995,20 @@ class GaussHelmertProblem(object):
       return
     raise ValueError("array not found")
 
+  def SetParameterization(self, array, param):
+    id, _ = self.cv_x.FindVector(array)
+    if id in self.dict_parameter_block:
+      b = self.dict_parameter_block[id]
+      b.param = param
+      return
+
+    id, _ = self.cv_l.FindVector(array)
+    if id in self.dict_observation_block:
+      b = self.dict_observation_block[id].param = param
+      b.param = param
+      return
+    raise ValueError("array not found")
+
   def SetUp(self):
     """ reset everything"""
     self.mat_sigma = SparseBlock()
@@ -996,30 +1017,71 @@ class GaussHelmertProblem(object):
     self.cv_dx  = CompoundVectorWithMapping()
     self.cv_dl  = CompoundVectorWithMapping()
 
+    def EnclosePlus(obj_func):
+      def callback(dv, v):
+        return obj_func(v, dv)
+      return callback
+
+    def EncloseToLocalJacobian(obj_func):
+      def callback(J):
+        return obj_func(J)
+      return callback
+
     for x in self.dict_parameter_block.values(): #array, dim, isfixed, param
       if x.isfixed:
         continue  # ignore fixed
 
       """1. dx vector, its pos"""
-      dx_offset, dx_array = self.cv_dx.AddMaping(x.dim, x.array)
+      param = x.param
+      if param is None:
+        dx_dim = x.dim
+        dx_offset, dx_array = self.cv_dx.AddMaping(dx_dim, x.array, lambda dx,x_ : x_+dx)
+        pre_process = None
+      else:
+        dx_dim = param.LocalSize()
+        dx_offset, dx_array = self.cv_dx.AddMaping(dx_dim, x.array, EnclosePlus(param.Plus))
+        pre_process = EncloseToLocalJacobian(param.ToLocalJacobian)
+
       """2. jacobian at that pos"""
       for dm in x.jac:
         dm.c = dx_offset
+        dm.shape[1] = dx_dim
+        dm.InitElement(dm.shape)
+        dm.pre_process = pre_process
         self.mat_jac_x.AddElement(dm)
 
     for l in self.dict_observation_block.values(): #array, dim, isfixed, param
       if l.isfixed:
         continue  # ignore fixed
+      param = l.param
+      if param is None:
+        dl_dim = l.dim
+        dl_offset, dl_array = self.cv_dl.AddMaping(dl_dim, l.array, lambda dl,l_ : l_+dl)
+        pre_process = None
+      else:
+        dl_dim = param.LocalSize()
+        dl_offset, dl_array = self.cv_dl.AddMaping(dl_dim, l.array, EnclosePlus(param.Plus))
+        pre_process = EncloseToLocalJacobian(param.ToLocalJacobian)
 
-      dl_offset, dl_array = self.cv_dl.AddMaping(l.dim, l.array)
       for dm in l.jac:
         dm.c = dl_offset
+        dm.shape[1] = dl_dim
+        dm.InitElement(dm.shape)
+        dm.pre_process = pre_process
         self.mat_jac_l.AddElement(dm)
 
       """3. sigma at that pos"""
-      dm = DenseMatrix(dl_offset, dl_offset, (l.dim, l.dim))
-      dm.Write( np.eye(l.dim) if l.sigma is None else l.sigma )
+      dm = DenseMatrix(dl_offset, dl_offset, (dl_dim, dl_dim))
+      dm.Write( np.eye(dl_dim) if l.sigma is None else l.sigma )
       self.mat_sigma.AddElement(dm)
+
+
+  def Plus(self,dx, dl):
+    self.cv_dx.flat[:] = dx
+    self.cv_dl.flat[:] = dl
+    self.cv_dx.Flush()
+    self.cv_dl.Flush()
+
 
 
   def AddConstraintUsingAD(self, g, x_list, l_list):
@@ -1049,7 +1111,8 @@ class GaussHelmertProblem(object):
     res_off, res_vec = self.cv_res.NewSegment(dim_res)
     dms = []
     for b in x_blocks + l_blocks:  #'array', 'dim', 'isfixed', 'param', 'jac'
-      new_dm = DenseMatrix(res_off, 0, (dim_res, b.dim) )
+      new_dm = DenseMatrix(res_off, 0)
+      new_dm.shape = [dim_res, 0]
       b.jac.append( new_dm )
       dms.append( new_dm )
 
@@ -1138,6 +1201,14 @@ class GaussHelmertProblem(object):
     return self.cv_l.tail
 
   @property
+  def dim_dx(self):
+    return self.cv_dx.tail
+
+  @property
+  def dim_dl(self):
+    return self.cv_dl.tail
+
+  @property
   def dim_res(self):
     return self.cv_res.tail
 
@@ -1208,6 +1279,16 @@ class GaussHelmertProblem(object):
       return self.cv_res.flat
 
   def UpdateJacobian(self, ouput=False):
+    for x in self.dict_parameter_block.values(): #array, dim, isfixed, param
+      if x.isfixed or x.param is None:
+        continue  # ignore fixed
+      x.param.UpdataJacobian(x.array)
+
+    for l in self.dict_observation_block.values(): #array, dim, isfixed, param
+      if l.isfixed or l.param is None:
+        continue  # ignore fixed
+      l.param.UpdataJacobian(l.array)
+
     for cb in self.constraint_blocks:
       cb.g_jac()
 
@@ -1441,31 +1522,61 @@ def test_ProblemMakeKKT():
 from cvxopt import matrix,spmatrix
 from cvxopt import solvers
 def SolveWithCVX(problem):
+  problem.SetUp()
   res  = problem.CompoundResidual()
   lc   = problem.CompoundObservation()
   xc   = problem.CompoundParameters()
-  l0   = lc.copy()
+  e    = np.zeros(problem.dim_dl)
 
   BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=True)
   Ja,Jb = problem.MakeJacobians(coo=True)
   Sigma = problem.mat_sigma.BuildSparseMatrix(coo=True)
-  b   = matrix(np.zeros((problem.dim_x, 1), 'd'))
+  b   = matrix(np.zeros((problem.dim_dx, 1), 'd'))
   for it in range(10):
     problem.UpdateJacobian()
     problem.UpdateResidual()
-    le  = lc - l0
-    print np.linalg.norm(res),np.linalg.norm(le)
+
+    print np.linalg.norm(res),np.linalg.norm(e)
 
     P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
-    q   = matrix(res-Jb*le)
+    q   = matrix(res - Jb*e)
     at  = spmatrix(Ja.data, Ja.col, Ja.row)     # transpose
     sol = solvers.qp(P,q, A=at, b=b )
-    lag = -np.array(sol['x']).ravel()
-    dx  = np.array(sol['y']).ravel()
-    dl  = Sigma * (lag * Jb) + le  # Jb.T * lag
-    xc  += dx
-    lc  -= dl
-  return xc, lc - l0
+    lag_neg = np.array(sol['x']).ravel()
+    dx      = np.array(sol['y']).ravel()
+    dl  = Sigma * (lag_neg * Jb) - e  # Jb.T * lag
+    problem.Plus(dx, dl)
+    e   += dl
+  return xc, e
+
+def test_FixAndParameterization():
+
+  x = np.ones((2, 3))
+  l = [np.random.rand(100,3) for _ in range(2)]
+  def iden(x,l):
+    return x-l
+  x2_true = [np.average(l[1][:,0]), 1, l[1][-1,2]]
+
+
+  problem = GaussHelmertProblem()
+  for i in range(2):
+    for j in range(l[0].shape[0]):
+      problem.AddConstraintUsingAD(iden, [x[i]], [l[i][j]])
+  problem.SetVarFixed(x[0])
+  problem.SetParameterization(x[1], SubsetParameterization([1,0,1]))
+  problem.SetParameterization(l[1][-1], SubsetParameterization([1,1,0]))
+
+  x_est,le = SolveWithCVX(problem)
+
+  problem.cv_l.OverWriteOrigin()
+  # fix
+  assert_array_equal(x_est[0:3], np.ones(3))
+  assert_array_equal(l[0], np.ones((100,3)))
+
+  # SubsetParameterization
+  assert_array_almost_equal(x_est[3:6], x2_true)
+  assert_array_almost_equal(l[1], VerticalRepeat(x2_true,100))
+  print "test_FixAndParameterization passed"
 #%%
 if __name__ == '__main__':
 
@@ -1480,28 +1591,39 @@ if __name__ == '__main__':
   test_ProblemJacobian()
   test_ProblemFixed()
   test_ProblemMakeKKT()
+  test_FixAndParameterization()
 
-  if 0:
-    dim_x = 3
-    dim_l, num_l = 3, 1000
 
-    A = np.random.rand(dim_l, dim_x)
-    def LinearConstraint(x, l):
-      return A.dot(x) - l
+#  def test_SE3Parameterization():
+#  if 1:
+#    Vec = SE3Parameterization.Vec12
+#    Mat = SE3Parameterization.Mat44
+#    def InvR(x_est, x0):
+#      return Vec( Mat(x_est).dot(Mat(x0)) - np.eye(4)  )
+#    import geometry
+#    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(np.random.rand(6)))
+#    l0 = Vec(T0)
+#    x0 = Vec(np.eye(4))
+#    problem = GaussHelmertProblem()
+#    problem.AddConstraintUsingAD(InvR, [x0], [l0])
+#    problem.SetParameterization(x0, SE3Parameterization())
+#    problem.SetParameterization(l0, SE3Parameterization())
+#
+#    x,le = SolveWithCVX(problem)
+#    assert_array_almost_equal(Mat(x), T0)
 
-    x = np.random.rand(dim_x)
-    l = A.dot(x) + 0.05*np.random.rand(num_l, dim_l)
 
-    sigma = np.full(dim_l, 0.05**2)
 
-    problem = GaussHelmertProblem()
-    for i in range(num_l):
-      problem.AddConstraintUsingAD(LinearConstraint,
-                                   [ x ],
-                                   [ l[i] ])
-      problem.SetSigma(l[i], np.diag(sigma))
 
-    x_est, e  = SolveWithCVX(problem)
 
-  #  x_est, e  = KKTSolve(problem).Solve()
-    print x,x_est
+
+
+
+
+
+
+
+
+
+
+
