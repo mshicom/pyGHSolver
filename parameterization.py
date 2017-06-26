@@ -150,3 +150,57 @@ def test_AutoDiffLocalParameterization():
     return x_
   par = AutoDiffLocalParameterization(SubSetPlus, x0, l0[:2 ])
   assert( np.all( par.ComputeJacobian(x0) == np.eye(3)[:,:2] ) )
+
+def skew(v):
+    return np.array([[   0, -v[2],  v[1]],
+                     [ v[2],    0, -v[0]],
+                     [-v[1], v[0],    0 ]])
+import scipy
+class SE3Parameterization(LocalParameterization):
+  @staticmethod
+  def Vec12(T): # column major flat
+    return T[:3,:4].ravel('F')
+  @staticmethod
+  def Mat34(x):
+    return np.reshape(x,(3,4),order='F')
+  @staticmethod
+  def Mat44(x):
+    return np.vstack([ np.reshape(x,(3,4),order='F'), [ 0, 0, 0, 1]])
+
+  # shared workspace for all instance
+  J = np.zeros((12,6))
+  J[9:12, 0:3] = np.eye(3)
+
+  def __init__(self):
+    self.jacobian = None
+
+  def GlobalSize(self):
+    """ Size of x """
+    return 12
+
+  def LocalSize(self):
+    """ Size of delta """
+    return 6
+
+  def Plus(self, x, delta):
+    """ Generalization of the addition operation.
+
+    x_plus_delta = Plus(x, delta)
+    with the condition that Plus(x, 0) = x.
+    """
+    t,omega = np.split(delta,2)
+    A = np.zeros((4,4))
+    A[:3,:3] = skew(omega)
+    A[:3, 3] = t
+    D = scipy.linalg.expm(A)
+    DX = D.dot(SE3Parameterization.Mat44(x))
+    return SE3Parameterization.Vec12(DX)
+
+  def ComputeJacobian(self, x):
+    c1,c2,c3,t = np.split(x, 4)
+    SE3Parameterization.J[0:3 , 3:6] = skew(-c1)
+    SE3Parameterization.J[3:6 , 3:6] = skew(-c2)
+    SE3Parameterization.J[6:9 , 3:6] = skew(-c3)
+    SE3Parameterization.J[9:12, 3:6] = skew(-t)
+    return SE3Parameterization.J
+

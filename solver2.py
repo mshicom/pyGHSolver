@@ -17,6 +17,7 @@ from itertools import chain
 
 from parameterization import *
 import pycppad
+from copy import copy
 #from pykrylov.linop import *
 #from pykrylov.minres import Minres
 #%% ColumnMajorSparseMatrix
@@ -1130,22 +1131,22 @@ class GaussHelmertProblem(object):
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
 
   def AddConstraintWithKnownBlocks(self, g, x_off, l_off):
-    x_vec,l_vec,x_sizes,l_sizes = [],[],[],[]
+    x_blocks,l_blocks,x_sizes,l_sizes = [],[],[],[]
     for x in x_off:
       block = self.dict_parameter_block.get(x, None)
       if block is None:
         raise RuntimeError("wrong id")
-      x_vec.append(block.array)
+      x_blocks.append(block)
       x_sizes.append(len(block.array))
 
     for l in l_off:
       block = self.dict_observation_block.get(l, None)
       if block is None:
         raise RuntimeError("wrong id")
-      l_vec.append(block.array)
+      l_blocks.append(block)
       l_sizes.append(len(block.array))
 
-    xl_vec = x_vec + l_vec
+    xl_vec = [ b.array for b in x_blocks+l_blocks ]
 
     xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
     """ 1. Generate Jacobian function by cppad """
@@ -1162,9 +1163,12 @@ class GaussHelmertProblem(object):
 
     """ 3. Compound vector for constraint residual """
     res_off, res_vec = self.cv_res.NewSegment(dim_res)
-
-    jac_submat_id_x = [ self.mat_jac_x.NewDenseMatrix(res_off, c, (dim_res, dim_x) ) for c, dim_x in zip(x_off, x_sizes) ]
-    jac_submat_id_l = [ self.mat_jac_l.NewDenseMatrix(res_off, c, (dim_res, dim_l) ) for c, dim_l in zip(l_off, l_sizes) ]
+    dms = []
+    for b in x_blocks + l_blocks:  #'array', 'dim', 'isfixed', 'param', 'jac'
+      new_dm = DenseMatrix(res_off, 0)
+      new_dm.shape = [dim_res, 0]
+      b.jac.append( new_dm )
+      dms.append( new_dm )
 
     """ 4. Generate constraint functor that use the mapped vectors """
     def g_res():
@@ -1174,13 +1178,11 @@ class GaussHelmertProblem(object):
       J = var_jacobian( np.hstack(xl_vec) )
       jac = np.split(J, xl_indices, axis=1)
       jac.reverse() # reversed, to pop(-1) instead of pop(0)
-      for submat_id in jac_submat_id_x:
-        self.mat_jac_x.PutDenseMatrix( submat_id, jac.pop() )
-
-      for submat_id in jac_submat_id_l:
-        self.mat_jac_l.PutDenseMatrix( submat_id, jac.pop() )
+      for dm in dms:
+        dm.Write( jac.pop() )
 
     self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
+
 
 
   def CompoundParameters(self):
@@ -1595,22 +1597,22 @@ if __name__ == '__main__':
 
 
 #  def test_SE3Parameterization():
-#  if 1:
-#    Vec = SE3Parameterization.Vec12
-#    Mat = SE3Parameterization.Mat44
-#    def InvR(x_est, x0):
-#      return Vec( Mat(x_est).dot(Mat(x0)) - np.eye(4)  )
-#    import geometry
-#    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(np.random.rand(6)))
-#    l0 = Vec(T0)
-#    x0 = Vec(np.eye(4))
-#    problem = GaussHelmertProblem()
-#    problem.AddConstraintUsingAD(InvR, [x0], [l0])
-#    problem.SetParameterization(x0, SE3Parameterization())
-#    problem.SetParameterization(l0, SE3Parameterization())
-#
-#    x,le = SolveWithCVX(problem)
-#    assert_array_almost_equal(Mat(x), T0)
+  if 1:
+    Vec = SE3Parameterization.Vec12
+    Mat = SE3Parameterization.Mat44
+    def InvR(x, l):
+      return Vec( Mat(x) - Mat(l)  )
+    import geometry
+    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(np.random.rand(6)))
+    l0 = Vec(T0)
+    x0 = Vec(np.eye(4))
+    problem = GaussHelmertProblem()
+    problem.AddConstraintUsingAD(InvR, [x0], [l0])
+    problem.SetParameterization(x0, SE3Parameterization())
+    problem.SetParameterization(l0, SE3Parameterization())
+
+    x,le = SolveWithCVX(problem)
+    assert_array_almost_equal(Mat(x), T0)
 
 
 
