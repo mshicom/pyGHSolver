@@ -7,6 +7,7 @@ Created on Wed Jun  7 14:32:19 2017
 """
 import numpy as np
 import pycppad
+from numpy.testing import *
 
 
 from abc import ABCMeta, abstractmethod
@@ -106,6 +107,7 @@ def test_SubsetParameterization():
   assert(par.GlobalSize() == 3)
   assert(par.LocalSize()  == 1)
   assert( np.all( par.ComputeJacobian(None) == np.array([ [1],[0],[0] ]) ) )
+  print "test_SubsetParameterization passed "
 
 class AutoDiffLocalParameterization(LocalParameterization):
   def __init__(self, plus_func, x0, delta0):
@@ -151,12 +153,17 @@ def test_AutoDiffLocalParameterization():
   par = AutoDiffLocalParameterization(SubSetPlus, x0, l0[:2 ])
   assert( np.all( par.ComputeJacobian(x0) == np.eye(3)[:,:2] ) )
 
+  print "test_AutoDiffLocalParameterization passed "
+
 def skew(v):
     return np.array([[   0, -v[2],  v[1]],
                      [ v[2],    0, -v[0]],
                      [-v[1], v[0],    0 ]])
 import scipy
 class SE3Parameterization(LocalParameterization):
+  """ se(3) = [t, omega]
+  https://pixhawk.org/_media/dev/know-how/jlblanco2010geometry3d_techrep.pdf
+  """
   @staticmethod
   def Vec12(T): # column major flat
     return T[:3,:4].ravel('F')
@@ -183,11 +190,7 @@ class SE3Parameterization(LocalParameterization):
     return 6
 
   def Plus(self, x, delta):
-    """ Generalization of the addition operation.
-
-    x_plus_delta = Plus(x, delta)
-    with the condition that Plus(x, 0) = x.
-    """
+    """ x_new = exp(delta) * R(x) """
     t,omega = np.split(delta,2)
     A = np.zeros((4,4))
     A[:3,:3] = skew(omega)
@@ -197,6 +200,7 @@ class SE3Parameterization(LocalParameterization):
     return SE3Parameterization.Vec12(DX)
 
   def ComputeJacobian(self, x):
+    """exp(ε) * R(x)"""
     c1,c2,c3,t = np.split(x, 4)
     SE3Parameterization.J[0:3 , 3:6] = skew(-c1)
     SE3Parameterization.J[3:6 , 3:6] = skew(-c2)
@@ -204,3 +208,25 @@ class SE3Parameterization(LocalParameterization):
     SE3Parameterization.J[9:12, 3:6] = skew(-t)
     return SE3Parameterization.J
 
+def test_SE3Parameterization():
+  import geometry
+
+  p = SE3Parameterization()
+  T0 = geometry.SE3.sample_uniform()
+  x0 = SE3Parameterization.Vec12(T0)
+
+  dx  = 0.05*np.random.rand(6) # [t, omega]
+  dx_ = np.r_[dx[3:],dx[:3]]  # [omega, t]
+
+  T1_ = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(dx_)).dot(T0)
+  T1  = SE3Parameterization.Mat44(p.Plus(x0, dx))
+  assert_array_almost_equal(T1_, T1)
+
+  dT = p.ComputeJacobian(x0).dot(dx)
+  assert_array_almost_equal( SE3Parameterization.Vec12(T1-T0), dT, 2)
+  print "test_SE3Parameterization passed "
+
+if __name__ == '__main__':
+  test_SubsetParameterization()
+  test_SE3Parameterization()
+  test_AutoDiffLocalParameterization()
