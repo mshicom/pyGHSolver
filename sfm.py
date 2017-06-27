@@ -10,11 +10,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D, art3d
 #from matplotlib.path import Path
 #from matplotlib.patches import PathPatch
+from contracts import contract,new_contract
 
 
 import sys
 sys.path.append('/home/nubot/data/workspace/hand-eye/')
-from batch_optimize import *
+#from batch_optimize import *
 
 import pycppad
 from solver2 import *
@@ -23,6 +24,41 @@ K = np.array([[100, 0,   250],
               [0,   100, 250],
               [0,   0,      1]],'d')
 K_inv = np.linalg.inv(K)
+def skew(v):
+    return np.array([[   0, -v[2],  v[1]],
+                     [ v[2],    0, -v[0]],
+                     [-v[1], v[0],    0 ]])
+
+def ax2Rot(r):
+    p = np.linalg.norm(r)
+    if np.abs(p) < 1e-12:
+        return np.eye(3)
+    else:
+        S = skew(r/p)
+        return np.eye(3) + np.sin(p)*S + (1.0-np.cos(p))*S.dot(S)
+
+def Rot2ax(R):
+    tr = np.trace(R)
+    a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
+    an = np.linalg.norm(a)
+    phi= np.arctan2(an, tr-1)
+    if np.abs(phi) < 1e-12:
+        return np.zeros(3,'d')
+    else:
+        return phi/an*a
+
+def MfromRT(r,t):
+    T = np.eye(4)
+    T[:3,:3] = ax2Rot(r)
+    T[:3, 3] = t
+    return T
+
+def invT(T):
+    R, t = T[:3, :3], T[:3, 3]
+    Ti = np.eye(4, dtype='d')
+    Ti[:3, :3] = R.T
+    Ti[:3, 3]  = -R.T.dot(t)
+    return Ti
 
 def Transform(P1, M21):
   P2 = M21[:3,:3].dot(P1) + M21[:3,3][:, np.newaxis]
@@ -69,22 +105,7 @@ def GenerateCameraPoseOnSphere(num_pose, radius):
   eyePoint /= np.linalg.norm(eyePoint, axis=0)/radius # on sphere of radius 2
   return [lookAt(p) for p in eyePoint.T]
 
-# generate camera pose
-num_pose = 10
-#Mcw = GenerateCameraPoseOnSphere(num_pose, 2)
-Mcw = [MfromRT(np.array([0, r,0],'d') , np.array([0,0,2],'d')) for r in np.linspace(0, 1.6*np.pi, num_pose) ]
 
-# generate point cloud
-num_point = 100
-Pw = 2*np.random.rand(3, num_point)-1
-Pw /= np.maximum(1, np.linalg.norm(Pw, axis=0)) # within unit sphere
-
-fig = plt.figure(figsize=(11,11) )
-ax = fig.add_subplot(111, projection='3d')
-ax.scatter(Pw[0],Pw[1],Pw[2], 'r' )
-ax.set_xlim3d(-3,3)
-ax.set_ylim3d(-3,3)
-ax.set_zlim3d(-3,3)
 
 def DrawCamera(Twc, scale=0.1):
   vertex = np.array([[ 0, 0, 0],
@@ -104,52 +125,198 @@ def DrawCamera(Twc, scale=0.1):
     plt.gca(projection='3d').plot(line1_data[0], line1_data[1], line1_data[2], 'b')
     plt.gca(projection='3d').plot(line2_data[0], line2_data[1], line2_data[2], 'b')
 
+#new_contract('Camera', lambda obj: isinstance(obj, Camera))
+#new_contract('KeyFrame', lambda obj: isinstance(obj, KeyFrame))
+#new_contract('Mappoint', lambda obj: isinstance(obj, Mappoint))
+import networkx as nx
+from itertools import product
+class SLAMSystem(object):
+  def __init__(self, K, baseline=None):
+    self.graph = nx.Graph()
+    self.cam = Camera(K) if baseline is None else StereoCamera(K,baseline)
 
-DrawCamera( [invT(M) for M in Mcw] , 0.2)
+  @property
+  def KFs(self):
+    for v in self.graph:
+      if isinstance(v, KeyFrame):
+        yield v
 
-p2d_true = [Project3Dto2D(Pw, M) for M in Mcw]
-p2d_noisy = [p2d + 0.5*np.random.randn(2, num_point)  for p2d in p2d_true]
-S_p2d = np.diag( np.full(num_point, 0.5**2) )
+  @property
+  def MPs(self):
+    for v in self.graph:
+      if isinstance(v, Mappoint):
+        yield v
 
-#%% 3D-2D absolute pose
-def Project3Dto2D_rt(Pw, r_cw, t_cw):
-  Pc = ax2Rot(r_cw).dot(Pw) + t_cw[:, np.newaxis]
-  p = K.dot(Pc)
-  return p[:2]/p[2]
+  def NewKF(self, **kwargs):
+    new_kf = KeyFrame( cam=self.cam, **kwargs)
+    self.graph.add_node(new_kf)
+    return new_kf
 
-if 1:
-  r_true  = [ Rot2ax(M[:3,:3])  for M in Mcw  ]
-  t_true  = [        M[:3, 3]   for M in Mcw  ]
-  r_noisy = [ r + 0.05*np.random.randn(3)  for r in r_true  ]
-  t_noisy = [ t + 0.05*np.random.randn(3)  for t in t_true  ]
+  def NewMP(self, **kwargs):
+    new_mp = Mappoint(**kwargs)
+    self.graph.add_node(new_mp)
+    return new_mp
 
-  def GenErrorFuncFor3DBatchProjection(P3d):
-    def ProjectError(r, t, p2d_x, p2d_y):
-      p2d_predict = Project3Dto2D_rt(P3d, r, t)
-      err_x = p2d_x - p2d_predict[0,:]
-      err_y = p2d_y - p2d_predict[1,:]
-      return np.hstack([err_x,err_y])
-    return ProjectError
+  def Simulation(self, num_point = 100, num_pose=10, radius=2):
+    for r in np.linspace(0, 1.6*np.pi, num_pose):
+      self.NewKF(t_cw=np.array([0,0,radius],'d'), r_cw=np.array([0, r,0],'d'))
 
-  BatchProjection3D = GenErrorFuncFor3DBatchProjection(Pw)
-  e = BatchProjection3D(r_true[0], t_true[0], p2d_true[0][0], p2d_true[0][1])
+    for i in xrange(num_point):
+      self.NewMP(xyz_w = 2*np.random.rand(3)-1 )
 
-  #
+
+  def Draw(self):
+    fig = plt.figure(figsize=(11,11), num='slam' )
+    ax = fig.add_subplot(111, projection='3d')
+    Pw = np.vstack(mp.xyz_w for mp in self.MPs).T
+    ax.scatter(Pw[0],Pw[1],Pw[2], 'r' )
+    ax.set_xlim3d(-3,3)
+    ax.set_ylim3d(-3,3)
+    ax.set_zlim3d(-3,3)
+
+    M = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in self.KFs ]
+    DrawCamera(M)
+
+
+
+class Mappoint(object):
+  def __init__(self, id=None, xyz_w=None):
+    self.id = id
+    self.xyz_w = xyz_w if not xyz_w is None else np.empty(3,'d')
+
+  def __repr__(self):
+    return "Mappoint(%s:%s)" % (self.id, self.xyz_w)
+
+
+class KeyFrame(object):
+  def __init__(self, id=None, cam=None, t_cw=None, r_cw=None):
+    self.cam  = cam
+    self.t_cw = t_cw if not t_cw is None else np.empty(3,'d')
+    self.r_cw = r_cw if not r_cw is None else np.empty(3,'d')
+    self.id = id
+
+  def __repr__(self):
+    return "KeyFrame(%s:%s,%s)" % (self.id, self.t_cw, self.r_cw)
+
+  @contract(xyz_w='array[3] | array[3xN] | list[3](number)')
+  def Project(self, xyz_w):
+    xyz_w = np.atleast_2d(xyz_w)
+    if xyz_w.shape[0] != 3:
+      xyz_w = xyz_w.T
+
+    xyz_c = ax2Rot(self.r_cw).dot(xyz_w) + self.t_cw.reshape(3,1)
+    return self.cam.Project(xyz_c)
+
+  @contract(u='array[N]', v='array[N]',returns='array[3xN]')
+  def BackProject(self, u, v):
+    xyz_c = self.cam.BackProject(u,v)
+    xyz_w = ax2Rot(self.r_cw).T.dot(xyz_c) - self.t_cw.reshape(3,1)
+    return xyz_w
+
+class Camera(object):
+  @contract(K='array[3x3]')
+  def __init__(self, K):
+    self.K = K.copy()
+    self.fx = K[0,0]
+    self.fy = K[1,1]
+    self.cx = K[0,2]
+    self.cy = K[1,2]
+    self.Kinv = np.linalg.inv(K)
+
+  @contract(p='array[3] | array[3xN] | list[3](number)')
+  def Project(self, p):
+    p = np.atleast_2d(p)
+    if p.shape[0] != 3:
+      p = p.T
+
+    u = self.fx * p[0]/p[2] + self.cx
+    v = self.fy * p[1]/p[2] + self.cy
+    return u, v
+
+  @contract(u='array[N]', v='array[N]',returns='array[3xN]')
+  def BackProject(self, u,v):
+    xyz = np.ones((3, u.shape[0]),'d')
+    xyz[0] = (u - self.cx)/self.fx
+    xyz[1] = (v - self.cy)/self.fy
+    return xyz
+
+class StereoCamera(Camera):
+  @contract(K='array[3x3]')
+  def __init__(self, K, baseline):
+    super(StereoCamera, self).__init__(K)
+    self.baseline = baseline
+    self.bf = baseline*self.fx
+
+  @contract(p='array[3] | array[3xN] | list[3](number)')
+  def Project(self, p):
+    u,v = super(StereoCamera, self).Project(p)
+    du = self.bf/p[2] # du=u_l - u_r and  du/fx=baseline/Z
+    return u, v, du
+
+  @contract(u='array[N]', v='array[N]',returns='array[3xN]')
+  def BackProject(self, u, v, du):
+    xyz = super(StereoCamera, self).BackProject(u, v)
+    xyz *= self.bf/du
+    return xyz
+
+K = np.array([[100, 0,   250],
+             [0,   100, 250],
+             [0,   0,      1]],'d')
+baseline = 0.5
+slam = SLAMSystem(K, baseline)
+slam.Simulation(10,3)
+slam.Draw()
+#%%
+def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
+  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  return np.hstack([err_u,err_v])
+
+if 0:
   problem = GaussHelmertProblem()
-  for i in range(num_pose):
-    problem.AddConstraintUsingAD( BatchProjection3D,
-                                 [ r_noisy[i], t_noisy[i] ],
-                                 [ p2d_noisy[i][0], p2d_noisy[i][1] ] )
-    problem.SetSigma(p2d_noisy[i][0], S_p2d)
-    problem.SetSigma(p2d_noisy[i][1], S_p2d)
-#  problem.SetVarFixed(r_noisy[0])
-#  problem.SetVarFixed(t_noisy[0])
+  for kf, mp in product(slam.KFs, slam.MPs):
+    if kf.id is None:
+      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
 
-  x, le = SolveWithCVX(problem)
-  print x.reshape(-1,6)
-  print np.c_[r_true, t_true]
+    if mp.id is None:
+      mp.id, _ = problem.AddParameter([mp.xyz_w])
+    u,v = kf.Project(mp.xyz_w)
+    uv_id, _ = problem.AddObservation([u,v])
+    slam.graph.add_edge(kf, mp, obs_u=u, obs_v=v)
 
+    problem.AddConstraintWithKnownBlocks(ProjectError, kf.id + mp.id, uv_id)
+  problem.SetVarFixed(kf.r_cw)
+  problem.SetVarFixed(kf.t_cw)
+  x,le,cov = SolveWithCVX(problem, cov=True)
 
+#%%
+def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
+  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  err_du= kf_du - baseline*K[0,0]/Pc[2]
+  return np.hstack([err_u,err_v,err_du])
+if 0:
+  problem = GaussHelmertProblem()
+  for kf, mp in product(slam.KFs, slam.MPs):
+    if kf.id is None:
+      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+
+    if mp.id is None:
+      mp.id, _ = problem.AddParameter([mp.xyz_w])
+    u,v,du = kf.Project(mp.xyz_w)
+    uvd_id, _ = problem.AddObservation([u,v,du])
+    slam.graph.add_edge(kf, mp, obs_u=u, obs_v=v, obs_du=du)
+
+    problem.AddConstraintWithKnownBlocks(StereoProjectError, kf.id + mp.id, uvd_id)
+  problem.SetVarFixed(kf.r_cw)
+  problem.SetVarFixed(kf.t_cw)
+  x,le,cov = SolveWithCVX(problem, cov=True)
 #%% 2D-2D ego motion
 #def EpipolarConstraint(r12, t12, p1x, p1y, p2x, p2y):
 #  E = skew(t12).dot( ax2Rot(r12) )

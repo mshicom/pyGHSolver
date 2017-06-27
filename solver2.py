@@ -953,28 +953,30 @@ class GaussHelmertProblem(object):
     self.dict_observation_block = OrderedDict()
 
   def AddParameter(self, x_list):
+    id = []
     blocks = []
     for x in x_list:
       offset, array = self.cv_x.AddVector(x)
-
+      id.append(offset)
       obj = self.dict_parameter_block.get(offset, None)
       if obj is None:
         obj = VariableBlock(array)
         self.dict_parameter_block[offset] = obj
       blocks.append(obj)
-    return blocks
+    return id, blocks
 
   def AddObservation(self, l_list):
+    id = []
     blocks = []
     for l in l_list:
       offset, array = self.cv_l.AddVector(l)
-
+      id.append(offset)
       obj = self.dict_observation_block.get(offset, None)
       if obj is None:
         obj = ObservationBlock(array)
         self.dict_observation_block[offset] = obj
       blocks.append(obj)
-    return blocks
+    return id, blocks
 
   def SetVarFixed(self, array):
     id, _ = self.cv_x.FindVector(array)
@@ -1103,8 +1105,8 @@ class GaussHelmertProblem(object):
     dim_res = len(res)
 
     """ 2. Assign poses and mapped vectors for input parameter/observation arrays"""
-    x_blocks = self.AddParameter(x_list)
-    l_blocks = self.AddObservation(l_list)
+    x_ids, x_blocks = self.AddParameter(x_list)
+    l_ids,l_blocks = self.AddObservation(l_list)
     xl_vec = [ b.array for b in x_blocks+l_blocks ]
 
     """ 3. Compound vector for constraint residual """
