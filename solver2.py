@@ -18,8 +18,7 @@ from itertools import chain
 from parameterization import *
 import pycppad
 from copy import copy
-#from pykrylov.linop import *
-#from pykrylov.minres import Minres
+
 #%% ColumnMajorSparseMatrix
 class LexicalSortable(object):
   def key(self):
@@ -1297,64 +1296,6 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
-
-
-class KKTSolve(object):
-  def __init__(self, problem):
-    self.problem = problem
-    self.l0      = problem.CompoundObservation().copy()
-    self.KKT     = problem.MakeReducedKKTMatrix( coo=True )
-    self.KKT_op  = CoordLinearOperator(self.KKT.data,
-                                       self.KKT.row,
-                                       self.KKT.col,
-                                       self.KKT.shape[1],
-                                       self.KKT.shape[0])
-    self.Sigma, self.W = problem.MakeSigmaAndWeightMatrix()
-    self.B       = problem.mat_jac_l.BuildSparseMatrix( coo=False )
-    problem.UpdateJacobian()
-    problem.UpdateResidual()
-#    self.cg = Minres(self.KKT_op)
-    try:
-#      self.op_A_inv = CholeskyOperator(self.KKT)
-      pass
-    except:
-      print "Cholesky failed"
-
-  def Solve(self, maxit = 20):
-    res  = self.problem.CompoundResidual()
-    xc   = self.problem.CompoundParameters()
-    lc   = self.problem.CompoundObservation()
-
-    b = np.zeros( len(res)+len(xc) )
-    seg_lambda = slice(0, len(res))
-    seg_dx     = slice(len(res), None)
-
-    le  = lc - self.l0
-    s = np.zeros_like(b)
-    for it in range(maxit):
-      print np.linalg.norm(res), le.dot(self.W*le)
-      b[seg_lambda]  = self.B * le - res
-      s[seg_dx] = 0
-      s = scipy.sparse.linalg.minres(self.KKT, b)[0]
-#      self.cg.solve(b,show=False)
-#      s = self.cg.x
-#      s   = self.op_A_inv * b
-      dx  = s[seg_dx]
-      lag = -s[seg_lambda]
-      dl = self.Sigma * (self.B.T * lag) + le
-
-      lc -= dl
-      xc += dx
-      le  = lc - self.l0
-
-      if np.abs(dx).max() < 1e-6:
-        break
-
-      self.problem.UpdateJacobian()
-#      self.op_A_inv.UpdataFactor(self.KKT)
-      self.problem.UpdateResidual()
-
-    return xc, le
 #%%
 def EqualityConstraint(a,b):
   return a-b
@@ -1435,51 +1376,6 @@ def test_ProblemJacobian():
   assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
   print "test_ProblemJacobian passed"
 
-def test_ProblemFixed():
-  dim_x, num_x = 3, 2
-  dim_l, num_l = 4, 3*num_x
-
-  dim_g = 3
-  dim_res = dim_g * num_l
-
-  A = np.random.rand(dim_g, dim_x)
-  B = np.random.rand(dim_g, dim_l)
-  AffineConstraint = MakeAffineConstraint(A,B)
-
-  x = np.zeros((num_x, dim_x))
-  l = [ np.ones((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
-  sigma = np.full(dim_l, 0.5)
-  problem = GaussHelmertProblem()
-  for i in range(num_x):
-    for j in range(num_l/num_x):
-      problem.AddConstraintUsingAD(AffineConstraint,
-                                   [ x[i] ],
-                                   [ l[i][j] ])
-      problem.SetSigma(l[i][j], np.diag(sigma))
-
-  problem.SetVarFixed(x[0])
-  problem.SetVarFixed(l[0][0])
-
-  problem.SetUp()
-
-  # fix
-  Jx,Jl = problem.MakeJacobians()
-  assert_equal( Jx.shape, (dim_res, dim_x*(num_x-1)) )
-  assert_equal( Jl.shape, (dim_res, dim_l*(num_l-1)) )
-
-
-  # 2 method
-#  problem = GaussHelmertProblem()
-#  for i in range(num_x):
-#    for j in range(num_l/num_x):
-#      x_off, _ = problem.AddParameter( [ x[i] ] )
-#      l_off, _ = problem.AddObservation( [ l[i][j] ] )
-#
-#      problem.AddConstraintWithKnownBlocks(AffineConstraint, x_off, l_off)
-#      problem.SetSigma(l_off, sigma)
-  print "test_ProblemFixed passed"
-
-
 
 def test_ProblemMakeKKT():
   def DumpXLConstraint(x,l):
@@ -1520,37 +1416,6 @@ def test_ProblemMakeKKT():
                      [ 4. ,  0. ,  0. ]])
   assert_equal(15, res)
   print "test_ProblemMakeKKT passed"
-
-from cvxopt import matrix,spmatrix
-from cvxopt import solvers
-def SolveWithCVX(problem):
-  problem.SetUp()
-  res  = problem.CompoundResidual()
-  lc   = problem.CompoundObservation()
-  xc   = problem.CompoundParameters()
-  e    = np.zeros(problem.dim_dl)
-
-  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=True)
-  Ja,Jb = problem.MakeJacobians(coo=True)
-  Sigma = problem.mat_sigma.BuildSparseMatrix(coo=True)
-  b   = matrix(np.zeros((problem.dim_dx, 1), 'd'))
-  for it in range(10):
-    problem.UpdateJacobian()
-    problem.UpdateResidual()
-
-    print np.linalg.norm(res),np.linalg.norm(e)
-
-    P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
-    q   = matrix(res - Jb*e)
-    at  = spmatrix(Ja.data, Ja.col, Ja.row)     # transpose
-    sol = solvers.qp(P,q, A=at, b=b )
-    lag_neg = np.array(sol['x']).ravel()
-    dx      = np.array(sol['y']).ravel()
-    dl  = Sigma * (lag_neg * Jb) - e  # Jb.T * lag
-    problem.Plus(dx, dl)
-    e   += dl
-  return xc, e
-
 def test_FixAndParameterization():
 
   x = np.ones((2, 3))
@@ -1569,6 +1434,8 @@ def test_FixAndParameterization():
   problem.SetParameterization(l[1][-1], SubsetParameterization([1,1,0]))
 
   x_est,le = SolveWithCVX(problem)
+#  x_est,le = SolveWithGEDense(problem)
+#  x_est,le = SolveWithKKT(problem)
 
   problem.cv_l.OverWriteOrigin()
   # fix
@@ -1579,6 +1446,128 @@ def test_FixAndParameterization():
   assert_array_almost_equal(x_est[3:6], x2_true)
   assert_array_almost_equal(l[1], VerticalRepeat(x2_true,100))
   print "test_FixAndParameterization passed"
+
+from cvxopt import matrix,spmatrix
+from cvxopt import solvers
+def SolveWithCVX(problem, fac=False, cov=False):
+  problem.SetUp()
+  res  = problem.CompoundResidual()
+  lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+  le    = np.zeros(problem.dim_dl)
+
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=True)
+  A,B = problem.MakeJacobians(coo=True)
+  Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=True)
+  b   = matrix(np.zeros((problem.dim_dx, 1), 'd'))
+  for it in range(10):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+
+    print np.linalg.norm(res),np.linalg.norm(le)
+
+    P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
+    q   = matrix(res - B*le)
+    At  = spmatrix(A.data, A.col, A.row)     # transpose
+    sol = solvers.qp(P,q, A=At, b=b )
+    lag_neg = np.array(sol['x']).ravel()
+    dx      = np.array(sol['y']).ravel()
+    dl  = Sigma * (lag_neg * B) - le  # B.T * lag
+    problem.Plus(dx, dl)
+    le   += dl
+    if np.abs(dx).max() < 1e-6:
+      break
+
+  ret = [xc, le]
+  if fac:
+    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    ret.append(factor)
+  if cov:
+    Wgg   = np.linalg.inv(BSBT.A)
+    ATWA= (Wgg * A).T * A
+    covariance = np.linalg.inv(ATWA)
+    ret.append( covariance )
+  return ret
+
+def SolveWithGEDense(problem, fac=False, cov=False):
+  problem.SetUp()
+  res  = problem.CompoundResidual()
+  lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+  le   = np.zeros(problem.dim_dl)
+
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=True)
+  A,B = problem.MakeJacobians(coo=True)
+  Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=True)
+  for it in range(10):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+
+    print np.linalg.norm(res),np.linalg.norm(le)
+    Wgg = np.linalg.inv(BSBT.A)
+    Cg  = B * le - res
+    ATW = (Wgg * A).T
+    ATWA= ATW * A
+    dx  = np.linalg.solve(ATWA,  ATW.dot(Cg))
+    lag = W.dot( A * dx - Cg )
+    dl  = -Sigma * (lag * B) - le  # B.T * lag
+    problem.Plus(dx, dl)
+    le  += dl
+    if np.abs(dx).max() < 1e-6:
+      break
+  ret = [xc, le]
+  if fac:
+    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    ret.append(factor)
+  if cov:
+    Wgg   = np.linalg.inv(BSBT.A)
+    ATWA= (Wgg * A).T * A
+    covariance = np.linalg.inv(ATWA)
+    ret.append( covariance )
+  return ret
+
+from pykrylov.linop import *
+from pykrylov.minres import Minres
+def SolveWithKKT(problem, maxit=10):
+  problem.SetUp()
+  res  = problem.CompoundResidual()
+  xc   = problem.CompoundParameters()
+  lc   = problem.CompoundObservation()
+
+  KKT      = problem.MakeReducedKKTMatrix( coo=False )
+  Sigma, W = problem.MakeSigmaAndWeightMatrix()
+  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
+  problem.UpdateJacobian()
+  problem.UpdateResidual()
+  op_A_inv = CholeskyOperator(KKT)
+
+  le       = np.zeros(problem.dim_dl)
+  b        = np.zeros( len(res) + problem.dim_dx )
+  seg_lambd= slice(0, len(res))
+  seg_dx   = slice(len(res), None)
+
+  for it in range(maxit):
+    print np.linalg.norm(res), np.linalg.norm(le)
+    b[seg_lambda]  = B * le - res
+
+    sol = op_A_inv * b
+    dx  = sol[seg_dx]
+    lag_neg = sol[seg_lambd]
+    dl  = Sigma * (lag_neg * B) - le
+
+    problem.Plus(dx, dl)
+    le   += dl
+
+    if np.abs(dx).max() < 1e-6:
+      break
+
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+    op_A_inv.UpdataFactor(KKT)
+
+  return xc, le
+
+
 #%%
 if __name__ == '__main__':
 
@@ -1591,19 +1580,38 @@ if __name__ == '__main__':
   test_ArrayID()
   test_CompoundVector()
   test_ProblemJacobian()
-  test_ProblemFixed()
   test_ProblemMakeKKT()
   test_FixAndParameterization()
 
+  def test_SolveWithGEDense():
+    dim_x = 3
+    a = np.ones(dim_x)
 
+    num_l = 100
+    sigma = 0.02
+    s = sigma**2*np.eye(dim_x)
+
+    for trail in range(1):
+      bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
+      problem = GaussHelmertProblem()
+      for i in range(num_l):
+        problem.AddConstraintUsingAD(lambda x,y:x-y,
+                                     [ a ],
+                                     [ bs[i] ])
+        problem.SetSigma(bs[i], s)
+    x,le,fac,cov = SolveWithGEDense(problem, True,True)
+    print fac
+    print cov
+
+  test_SolveWithGEDense()
 #  def test_SE3Parameterization():
-  if 1:
+  if 0:
     Vec = SE3Parameterization.Vec12
     Mat = SE3Parameterization.Mat44
     def InvR(x, l):
       return Vec( Mat(x) - Mat(l)  )
     import geometry
-    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(np.random.rand(6)))
+    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(0.1*np.random.rand(6)))
     l0 = Vec(T0)
     x0 = Vec(np.eye(4))
     problem = GaussHelmertProblem()
@@ -1611,8 +1619,10 @@ if __name__ == '__main__':
     problem.SetParameterization(x0, SE3Parameterization())
     problem.SetParameterization(l0, SE3Parameterization())
 
-    x,le = SolveWithCVX(problem)
-    assert_array_almost_equal(Mat(x), T0)
+    x,le = SolveWithGEDense(problem)
+#    x,le = SolveWithKKT(problem)
+#    x,le = SolveWithCVX(problem)
+#    assert_array_almost_equal(Mat(x), T0)
 
 
 

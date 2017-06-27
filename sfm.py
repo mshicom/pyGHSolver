@@ -17,7 +17,7 @@ sys.path.append('/home/nubot/data/workspace/hand-eye/')
 from batch_optimize import *
 
 import pycppad
-from solver import *
+from solver2 import *
 
 K = np.array([[100, 0,   250],
               [0,   100, 250],
@@ -70,12 +70,12 @@ def GenerateCameraPoseOnSphere(num_pose, radius):
   return [lookAt(p) for p in eyePoint.T]
 
 # generate camera pose
-num_pose = 2
+num_pose = 10
 #Mcw = GenerateCameraPoseOnSphere(num_pose, 2)
-Mcw = [MfromRT(np.array([0, r,0],'d') , np.array([0,0,2],'d')) for r in np.linspace(0, 0.5*np.pi, num_pose) ]
+Mcw = [MfromRT(np.array([0, r,0],'d') , np.array([0,0,2],'d')) for r in np.linspace(0, 1.6*np.pi, num_pose) ]
 
 # generate point cloud
-num_point = 10
+num_point = 100
 Pw = 2*np.random.rand(3, num_point)-1
 Pw /= np.maximum(1, np.linalg.norm(Pw, axis=0)) # within unit sphere
 
@@ -109,83 +109,7 @@ DrawCamera( [invT(M) for M in Mcw] , 0.2)
 
 p2d_true = [Project3Dto2D(Pw, M) for M in Mcw]
 p2d_noisy = [p2d + 0.5*np.random.randn(2, num_point)  for p2d in p2d_true]
-
-#%% 2D-2D ego motion
-def EpipolarConstraint(r12, t12, p1x, p1y, p2x, p2y):
-  E = skew(t12).dot( ax2Rot(r12) )
-  F = K_inv.T.dot(E).dot(K_inv)
-  P1 = np.vstack( [ p1x, p1y, np.ones( len(p1x) ) ] )
-  P2 = np.vstack( [ p2x, p2y, np.ones( len(p2x) ) ] )
-  err = [ p1.dot(F).dot(p2) for p1, p2 in zip(P1.T, P2.T)]
-  return np.hstack(err)
-
-def test_EpipolarConstraint():
-  e = EpipolarConstraint(dr_true[0], dt_true[0],
-                         p2d_true[0][0], p2d_true[0][1], p2d_true[1][0], p2d_true[1][1] )
-  x_list = [ dr_true[0].copy(), dt_true[0].copy() ]
-  l_list = [ p2d_noisy[0][0].copy(), p2d_noisy[0][1].copy(),
-                                 p2d_noisy[1][0].copy(), p2d_noisy[1][1].copy()]
-  f = GenerateJacobianFunction(EpipolarConstraint, x_list, l_list)
-  Js = f( np.hstack(x_list),  np.hstack(l_list) )
-
-def GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw):
-  Pc = Transform(Pw, Mcw)
-  def RelativeProjectionConstraint(r12, t12, p2x, p2y):
-    P2 = ax2Rot(r12).T.dot( Pc - t12[:, np.newaxis] )
-    p2 = K.dot( P2 )
-    p2 = p2[:2]/p2[2]
-    err = [ p2[0] - p2x, p2[1] - p2y ]
-    return np.hstack(err)
-  return RelativeProjectionConstraint
-def test_RelativeProjectionConstraint():
-  M12ProjectionConstraint = GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw[0])
-  M12ProjectionConstraint(dr_true[0], dt_true[0], p2d_true[1][0], p2d_true[1][1])
-
-# test data
-loop_closing = 0
-sigma = 1
-
-dM = [ Ms.dot( invT(Me) ) for Ms,Me in zip(Mcw[:-1], Mcw[1:])] # Msw_we
-if loop_closing:
-  dM.append( Mcw[-1].dot( invT( Mcw[0] ) ) ) # loop closing
-dr_true = [ Rot2ax(M[:3,:3])  for M in dM  ]
-dt_true = [        M[:3, 3]   for M in dM  ]
-
-
-sigma_null = []
-for it in range(1):
-  p2d_noisy_x = [p2d[0] + sigma*np.random.randn(num_point)  for p2d in p2d_true]
-  p2d_noisy_y = [p2d[1] + sigma*np.random.randn(num_point)  for p2d in p2d_true]
-  dr_noisy = [ r + 0.1*np.random.randn(3)  for r in dr_true  ]
-  dt_noisy = [ t + 0.2*np.random.randn(3)  for t in dt_true  ]
-
-  problem = GaussHelmertProblem()
-
-  M01ProjectionConstraint = GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw[0])
-  problem.AddConstraintUsingAD( M01ProjectionConstraint,
-                                [ dr_noisy[0],       dt_noisy[0] ],
-                                [ p2d_noisy_x[1],    p2d_noisy_y[1] ],
-                                [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*2 )
-
-#  for i in range( len(dM) - loop_closing ):
-#    problem.AddConstraintUsingAD( EpipolarConstraint,
-#                                 [ dr_noisy[i],       dt_noisy[i] ],
-#                                 [ p2d_noisy_x[i  ], p2d_noisy_y[i  ],
-#                                   p2d_noisy_x[i+1], p2d_noisy_y[i+1]],
-#                                 [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
-  if loop_closing:
-    problem.AddConstraintUsingAD( EpipolarConstraint,
-                                 [ dr_noisy[-1],       dt_noisy[-1] ],
-                                 [ p2d_noisy_x[-1],   p2d_noisy_y[-1],
-                                   p2d_noisy_x[0 ],   p2d_noisy_y[0 ]],
-                                 [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
-
-  x, le = problem.SolveGaussEliminateDense()
-  sigma_null.append( problem.variance_factor )
-plt.figure()
-plt.hist( sigma_null )
-dr_true
-Mest = [ MfromRT(x_[:3], x_[3:]) for x_ in np.split(x,  len(dM)) ]
+S_p2d = np.diag( np.full(num_point, 0.5**2) )
 
 #%% 3D-2D absolute pose
 def Project3Dto2D_rt(Pw, r_cw, t_cw):
@@ -193,7 +117,7 @@ def Project3Dto2D_rt(Pw, r_cw, t_cw):
   p = K.dot(Pc)
   return p[:2]/p[2]
 
-if 0:
+if 1:
   r_true  = [ Rot2ax(M[:3,:3])  for M in Mcw  ]
   t_true  = [        M[:3, 3]   for M in Mcw  ]
   r_noisy = [ r + 0.05*np.random.randn(3)  for r in r_true  ]
@@ -214,11 +138,99 @@ if 0:
   problem = GaussHelmertProblem()
   for i in range(num_pose):
     problem.AddConstraintUsingAD( BatchProjection3D,
-                                 [ r_noisy[i].copy(), t_noisy[i].copy() ],
-                                 [ p2d_noisy[i][0].copy(), p2d_noisy[i][1].copy() ] )
-  x, le = problem.SolveGaussEliminateDense()
-  print MfromRT(x[:3], x[3:6])
-  print Mcw[0]
+                                 [ r_noisy[i], t_noisy[i] ],
+                                 [ p2d_noisy[i][0], p2d_noisy[i][1] ] )
+    problem.SetSigma(p2d_noisy[i][0], S_p2d)
+    problem.SetSigma(p2d_noisy[i][1], S_p2d)
+#  problem.SetVarFixed(r_noisy[0])
+#  problem.SetVarFixed(t_noisy[0])
+
+  x, le = SolveWithCVX(problem)
+  print x.reshape(-1,6)
+  print np.c_[r_true, t_true]
+
+
+#%% 2D-2D ego motion
+#def EpipolarConstraint(r12, t12, p1x, p1y, p2x, p2y):
+#  E = skew(t12).dot( ax2Rot(r12) )
+#  F = K_inv.T.dot(E).dot(K_inv)
+#  P1 = np.vstack( [ p1x, p1y, np.ones( len(p1x) ) ] )
+#  P2 = np.vstack( [ p2x, p2y, np.ones( len(p2x) ) ] )
+#  err = [ p1.dot(F).dot(p2) for p1, p2 in zip(P1.T, P2.T)]
+#  return np.hstack(err)
+#
+#def test_EpipolarConstraint():
+#  e = EpipolarConstraint(dr_true[0], dt_true[0],
+#                         p2d_true[0][0], p2d_true[0][1], p2d_true[1][0], p2d_true[1][1] )
+#  x_list = [ dr_true[0].copy(), dt_true[0].copy() ]
+#  l_list = [ p2d_noisy[0][0].copy(), p2d_noisy[0][1].copy(),
+#                                 p2d_noisy[1][0].copy(), p2d_noisy[1][1].copy()]
+#  f = GenerateJacobianFunction(EpipolarConstraint, x_list, l_list)
+#  Js = f( np.hstack(x_list),  np.hstack(l_list) )
+#
+#def GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw):
+#  Pc = Transform(Pw, Mcw)
+#  def RelativeProjectionConstraint(r12, t12, p2x, p2y):
+#    P2 = ax2Rot(r12).T.dot( Pc - t12[:, np.newaxis] )
+#    p2 = K.dot( P2 )
+#    p2 = p2[:2]/p2[2]
+#    err = [ p2[0] - p2x, p2[1] - p2y ]
+#    return np.hstack(err)
+#  return RelativeProjectionConstraint
+#def test_RelativeProjectionConstraint():
+#  M12ProjectionConstraint = GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw[0])
+#  M12ProjectionConstraint(dr_true[0], dt_true[0], p2d_true[1][0], p2d_true[1][1])
+#
+## test data
+#loop_closing = 0
+#sigma = 0.5
+#
+#dM = [ Ms.dot( invT(Me) ) for Ms,Me in zip(Mcw[:-1], Mcw[1:])] # Msw_we
+#if loop_closing:
+#  dM.append( Mcw[-1].dot( invT( Mcw[0] ) ) ) # loop closing
+#dr_true = [ Rot2ax(M[:3,:3])  for M in dM  ]
+#dt_true = [        M[:3, 3]   for M in dM  ]
+#
+#
+#sigma_null = []
+#for it in range(1):
+#  p2d_noisy_x = [p2d[0] + sigma*np.random.randn(num_point)  for p2d in p2d_true]
+#  p2d_noisy_y = [p2d[1] + sigma*np.random.randn(num_point)  for p2d in p2d_true]
+#
+#
+#  dr_noisy = [ r + 0.1*np.random.randn(3)  for r in dr_true  ]
+#  dt_noisy = [ t + 0.2*np.random.randn(3)  for t in dt_true  ]
+
+#  problem = GaussHelmertProblem()
+#
+#  M01ProjectionConstraint = GenErrorFuncFor3DBatchRelativeProjection(Pw, Mcw[0])
+#  problem.AddConstraintUsingAD( M01ProjectionConstraint,
+#                                [ dr_noisy[0],       dt_noisy[0] ],
+#                                [ p2d_noisy_x[1],    p2d_noisy_y[1] ])
+#  problem.SetSigma(p2d_noisy_x[1], S_p2d)
+#  problem.SetSigma(p2d_noisy_y[1], S_p2d)
+
+#  for i in range( len(dM) - loop_closing ):
+#    problem.AddConstraintUsingAD( EpipolarConstraint,
+#                                 [ dr_noisy[i],       dt_noisy[i] ],
+#                                 [ p2d_noisy_x[i  ], p2d_noisy_y[i  ],
+#                                   p2d_noisy_x[i+1], p2d_noisy_y[i+1]],
+#                                 [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
+#  if loop_closing:
+#    problem.AddConstraintUsingAD( EpipolarConstraint,
+#                                 [ dr_noisy[-1],       dt_noisy[-1] ],
+#                                 [ p2d_noisy_x[-1],   p2d_noisy_y[-1],
+#                                   p2d_noisy_x[0 ],   p2d_noisy_y[0 ]],
+#                                 [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
+#
+#  x, le = problem.SolveGaussEliminateDense()
+#  sigma_null.append( problem.variance_factor )
+#plt.figure()
+#plt.hist( sigma_null )
+#dr_true
+#Mest = [ MfromRT(x_[:3], x_[3:]) for x_ in np.split(x,  len(dM)) ]
+
+
 #%% stereo
 def GenErrorFuncForStereoConstraint(M12, K):
   R12, t12 = M12[:3,:3], M12[:3,3][:, np.newaxis]
@@ -240,32 +252,33 @@ def StereoMotionConstraint(d1, r12, t12, p1x, p1y, p2x, p2y):
   err_y = p2y - p21[1,:]
   return np.hstack([err_x, err_y])
 
-Msc = MfromRT(np.zeros(3), np.r_[-2.5, 0, 0])
-d =  [ Transform(Pw, M)[2].copy() for M in Mcw]
+if 0:
+  Msc = MfromRT(np.zeros(3), np.r_[-2.5, 0, 0])
+  d =  [ Transform(Pw, M)[2].copy() for M in Mcw]
 
-p2d_stereo = [Project3Dto2D(Pw, Msc.dot(M) ) for M in Mcw]
-p2d_stereo_noisy_x = [p2d[0] + sigma*np.random.randn(num_point)  for p2d in p2d_stereo]
-p2d_stereo_noisy_y = [p2d[1] + sigma*np.random.randn(num_point)  for p2d in p2d_stereo]
+  p2d_stereo = [Project3Dto2D(Pw, Msc.dot(M) ) for M in Mcw]
+  p2d_stereo_noisy_x = [p2d[0] + sigma*np.random.randn(num_point)  for p2d in p2d_stereo]
+  p2d_stereo_noisy_y = [p2d[1] + sigma*np.random.randn(num_point)  for p2d in p2d_stereo]
 
-StereoConstraint = GenErrorFuncForStereoConstraint(Msc, K)
-StereoConstraint(d[0], p2d_stereo[0][0], p2d_stereo[0][1], p2d_true[0][0], p2d_true[0][1])
+  StereoConstraint = GenErrorFuncForStereoConstraint(Msc, K)
+  StereoConstraint(d[0], p2d_stereo[0][0], p2d_stereo[0][1], p2d_true[0][0], p2d_true[0][1])
 
-problem = GaussHelmertProblem()
+  problem = GaussHelmertProblem()
 
-for i in range( len(dM)):
-  problem.AddConstraintUsingAD( StereoConstraint,
-                             [ d[i] ],
-                             [ p2d_stereo_noisy_x[i],   p2d_stereo_noisy_y[i],
-                               p2d_noisy_x[i],     p2d_noisy_y[i]],
-                             [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
-
-  problem.AddConstraintUsingAD( StereoMotionConstraint,
-                               [ d[i], dr_noisy[i],    dt_noisy[i] ],
-                               [ p2d_noisy_x[i  ], p2d_noisy_y[i  ],
-                                 p2d_noisy_x[i+1], p2d_noisy_y[i+1]],
+  for i in range( len(dM)):
+    problem.AddConstraintUsingAD( StereoConstraint,
+                               [ d[i] ],
+                               [ p2d_stereo_noisy_x[i],   p2d_stereo_noisy_y[i],
+                                 p2d_noisy_x[i],     p2d_noisy_y[i]],
                                [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
 
-x, le = problem.SolveGaussEliminateDense()
+    problem.AddConstraintUsingAD( StereoMotionConstraint,
+                                 [ d[i], dr_noisy[i],    dt_noisy[i] ],
+                                 [ p2d_noisy_x[i  ], p2d_noisy_y[i  ],
+                                   p2d_noisy_x[i+1], p2d_noisy_y[i+1]],
+                                 [ np.diag( np.full(num_point, 1./sigma**2 ) ) ]*4 )
+
+  x, le = problem.SolveGaussEliminateDense()
 
 #%%
 if 0:
