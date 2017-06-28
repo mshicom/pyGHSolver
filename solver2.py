@@ -1471,12 +1471,16 @@ def SolveWithCVX(problem, fac=False, cov=False):
     P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
     q   = matrix(res - B*le)
     At  = spmatrix(A.data, A.col, A.row)     # transpose
-    sol = solvers.qp(P,q, A=At, b=b )
-    lag_neg = np.array(sol['x']).ravel()
-    dx      = np.array(sol['y']).ravel()
-    dl  = Sigma * (lag_neg * B) - le  # B.T * lag
-    problem.Plus(dx, dl)
-    le   += dl
+    try:
+      sol = solvers.qp(P,q, A=At, b=b )
+      lag_neg= np.array(sol['x']).ravel()
+      dx  = np.array(sol['y']).ravel()
+      dl  = Sigma * (lag_neg * B) - le  # B.T * lag
+      problem.Plus(dx, dl)
+      le   += dl
+    except:
+      print "Singular problem"
+      break
     if np.abs(dx).max() < 1e-6:
       break
 
@@ -1511,64 +1515,133 @@ def SolveWithGEDense(problem, fac=False, cov=False):
     ATW = (Wgg * A).T
     ATWA= ATW * A
     dx  = np.linalg.solve(ATWA,  ATW.dot(Cg))
-    lag = W.dot( A * dx - Cg )
+    if np.abs(dx).max() < 1e-6:
+      break
+    lag = Wgg.dot( A * dx - Cg )
     dl  = -Sigma * (lag * B) - le  # B.T * lag
     problem.Plus(dx, dl)
     le  += dl
-    if np.abs(dx).max() < 1e-6:
-      break
+
   ret = [xc, le]
   if fac:
     factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
     ret.append(factor)
   if cov:
-    Wgg   = np.linalg.inv(BSBT.A)
-    ATWA= (Wgg * A).T * A
     covariance = np.linalg.inv(ATWA)
     ret.append( covariance )
   return ret
 
-from pykrylov.linop import *
-from pykrylov.minres import Minres
-def SolveWithKKT(problem, maxit=10):
+from sksparse.cholmod import cholesky,CholmodNotPositiveDefiniteError
+def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
   problem.SetUp()
   res  = problem.CompoundResidual()
-  xc   = problem.CompoundParameters()
   lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+  le   = np.zeros(problem.dim_dl)
 
-  KKT      = problem.MakeReducedKKTMatrix( coo=False )
-  Sigma, W = problem.MakeSigmaAndWeightMatrix()
-  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
-  problem.UpdateJacobian()
-  problem.UpdateResidual()
-  op_A_inv = CholeskyOperator(KKT)
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=False)
+  A,B = problem.MakeJacobians(coo=False)
+  Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=False)
 
-  le       = np.zeros(problem.dim_dl)
-  b        = np.zeros( len(res) + problem.dim_dx )
-  seg_lambd= slice(0, len(res))
-  seg_dx   = slice(len(res), None)
+  Sgg_factor  = None
+  Sxx_factor  = None
 
   for it in range(maxit):
-    print np.linalg.norm(res), np.linalg.norm(le)
-    b[seg_lambda]  = B * le - res
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+    print np.linalg.norm(res),np.linalg.norm(le)
+    Cg  = B * le - res
 
-    sol = op_A_inv * b
-    dx  = sol[seg_dx]
-    lag_neg = sol[seg_lambd]
-    dl  = Sigma * (lag_neg * B) - le
+    if Sgg_factor is None:
+      Sgg_factor = cholesky(BSBT)
+    else:
+      Sgg_factor.cholesky_inplace(BSBT)
 
-    problem.Plus(dx, dl)
-    le   += dl
+    F = Sgg_factor.solve_A(A)   # W * A = F -->> A = BSBT * F
+                                # ATW = (BSBT * F).T / BSBT = F.T
+    ATWA= (A.T * F).T           # to maintain in csc
+    if Sxx_factor is None:
+      Sxx_factor = cholesky(ATWA)
+    else:
+      Sxx_factor.cholesky_inplace(ATWA)
+    dx  = Sxx_factor.solve_A( Cg * F )  #np.linalg.solve(ATWA,  ATW.dot(Cg))
 
     if np.abs(dx).max() < 1e-6:
       break
+    lag = Sgg_factor.solve_A( A * dx - Cg ) # BSBT*lambda = A*dx - Cg
+    dl  = -Sigma * (lag * B) - le  # B.T * lag
+    problem.Plus(dx, dl)
+    le  += dl
 
-    problem.UpdateJacobian()
-    problem.UpdateResidual()
-    op_A_inv.UpdataFactor(KKT)
+  ret = [xc, le]
+  if fac:
+    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    ret.append(factor)
+  if cov:
+    covariance = Sxx_factor.inv()
+    ret.append( covariance )
+  return ret
 
-  return xc, le
+#from pykrylov.symmlq import Symmlq
+#from symmlq import symmlq
+#from cvxopt import blas
+#def SolveWithKKT(problem, maxit=10, fac=False):
+#  problem.SetUp()
+#  res  = problem.CompoundResidual()
+#  xc   = problem.CompoundParameters()
+#  lc   = problem.CompoundObservation()
+#
+#  KKT      = problem.MakeReducedKKTMatrix( coo=True )
+#  Sigma, W = problem.MakeSigmaAndWeightMatrix()
+#  B        = problem.mat_jac_l.BuildSparseMatrix( coo=False )
+#
+#  le       = np.zeros(problem.dim_dl)
+#  b        = np.zeros( len(res) + problem.dim_dx )
+#  seg_lambd= slice(0, len(res))
+#  seg_dx   = slice(len(res), None)
+#
+##  op_A   = CoordLinearOperator(KKT.data, KKT.row, KKT.col, KKT.shape[1], KKT.shape[0] )
+##  solver = Symmlq(KKT)
+#
+#  for it in range(maxit):
+#    problem.UpdateJacobian()
+#    problem.UpdateResidual()
+#    print np.linalg.norm(res), np.linalg.norm(le)
+#    b[seg_lambd]  = B * le - res
+#
+#    G   = spmatrix(KKT.data, KKT.row, KKT.col)
+#    q   = matrix(b)
+#    sol = np.array(symmlq( q, G, show=1 )[0]).ravel()
+#
+##    solver.solve(b)
+##    sol = solver.x
+#
+#    dx      = sol[seg_dx]
+#    lag_neg = sol[seg_lambd]
+#    dl  = Sigma * (lag_neg * B) - le
+#
+#    problem.Plus(dx, dl)
+#    le   += dl
+#
+#    if np.abs(dx).max() < 1e-6:
+#      break
+#
+#    problem.UpdateJacobian()
+#    problem.UpdateResidual()
+#
+#  ret = [xc, le]
+#  if fac:
+#    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+#    ret.append(factor)
+#
+#  return ret
 
+def ViewSparseMat(M):
+  if not scipy.sparse.isspmatrix_coo(M):
+    M = M.tocoo()
+  img = np.ones(M.shape, 'u8')
+  img[M.row, M.col] = np.logical_not(M.data)
+  plt.matshow(img)
 
 #%%
 if __name__ == '__main__':
@@ -1585,11 +1658,11 @@ if __name__ == '__main__':
   test_ProblemMakeKKT()
   test_FixAndParameterization()
 
-  def test_SolveWithGEDense():
+  def test_SolveWithGESparse():
     dim_x = 3
     a = np.ones(dim_x)
 
-    num_l = 100
+    num_l = 10
     sigma = 0.02
     s = sigma**2*np.eye(dim_x)
 
@@ -1601,13 +1674,14 @@ if __name__ == '__main__':
                                      [ a ],
                                      [ bs[i] ])
         problem.SetSigma(bs[i], s)
-    x,le,fac,cov = SolveWithGEDense(problem, True,True)
-    print fac
-    print cov
 
-  test_SolveWithGEDense()
-#  def test_SE3Parameterization():
-  if 0:
+    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
+    problem.SetSigma(bs[0], sigma**2*np.eye(2))
+    x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
+    print fac
+
+
+  def test_SE3Parameterization():
     Vec = SE3Parameterization.Vec12
     Mat = SE3Parameterization.Mat44
     def InvR(x, l):
@@ -1621,11 +1695,16 @@ if __name__ == '__main__':
     problem.SetParameterization(x0, SE3Parameterization())
     problem.SetParameterization(l0, SE3Parameterization())
 
-    x,le = SolveWithGEDense(problem)
-#    x,le = SolveWithKKT(problem)
-#    x,le = SolveWithCVX(problem)
-#    assert_array_almost_equal(Mat(x), T0)
+    try:
+      x,le,fac = SolveWithGESparse(problem,fac=True)
+    except CholmodNotPositiveDefiniteError:
+      return
 
+    print fac
+    assert_array_almost_equal(Mat(x), T0)
+    print "test_SE3Parameterization passed"
+
+  test_SE3Parameterization()
 
 
 
