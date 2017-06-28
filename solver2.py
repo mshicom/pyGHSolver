@@ -5,6 +5,8 @@ Created on Fri Apr 28 10:08:11 2017
 
 @author: kaihong
 """
+import matplotlib.pyplot as plt
+
 import numpy as np
 import scipy
 import scipy.sparse
@@ -18,7 +20,6 @@ from itertools import chain
 from parameterization import *
 import pycppad
 from copy import copy
-
 #%% ColumnMajorSparseMatrix
 class LexicalSortable(object):
   def key(self):
@@ -1298,6 +1299,37 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
+  def ViewJacobianPattern(self, fig=None):
+
+    if None in (self.Jx, self.Jl):
+      return
+    A,B = self.Jx, self.Jl
+    if not scipy.sparse.isspmatrix_coo(A):
+      A = A.tocoo()
+    img_A = np.ones(A.shape, 'u8')
+    img_A[A.row, A.col] = np.logical_not(A.data)
+
+    if not scipy.sparse.isspmatrix_coo(B):
+      B = B.tocoo()
+    img_B = np.ones(B.shape, 'u8')
+    img_B[B.row, B.col] = np.logical_not(B.data)
+
+    import mpl_toolkits.axes_grid.axes_size as Size
+    from mpl_toolkits.axes_grid import Divider
+
+    f,(a,b) = plt.subplots(1,2, sharey=True, num=fig)
+    rect = (0.1, 0.1, 0.8, 0.8)
+    horiz = [Size.AxesX(a), Size.Fixed(.5), Size.AxesX(b)]
+    divider = Divider(f, rect, horiz, [Size.Scaled(1)])
+
+    a.matshow(img_A)
+    a.set_axes_locator(divider.new_locator(nx=0, ny=0))
+    a.set_xlim([0, A.shape[1]])
+    b.matshow(img_B)
+    b.set_axes_locator(divider.new_locator(nx=2, ny=0))
+    b.set_xlim([0, B.shape[1]])
+    plt.pause(0.001)
+
 #%%
 def EqualityConstraint(a,b):
   return a-b
@@ -1636,12 +1668,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
 #
 #  return ret
 
-def ViewSparseMat(M):
-  if not scipy.sparse.isspmatrix_coo(M):
-    M = M.tocoo()
-  img = np.ones(M.shape, 'u8')
-  img[M.row, M.col] = np.logical_not(M.data)
-  plt.matshow(img)
+
 
 #%%
 if __name__ == '__main__':
@@ -1675,11 +1702,11 @@ if __name__ == '__main__':
                                      [ bs[i] ])
         problem.SetSigma(bs[i], s)
 
-    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
-    problem.SetSigma(bs[0], sigma**2*np.eye(2))
+#    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
+#    problem.SetSigma(bs[0], sigma**2*np.eye(2))
     x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
     print fac
-
+    problem.ViewJacobianPattern()
 
   def test_SE3Parameterization():
     Vec = SE3Parameterization.Vec12
