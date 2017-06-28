@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D, art3d
 #from matplotlib.path import Path
 #from matplotlib.patches import PathPatch
-from contracts import contract,new_contract
-
+from contracts import contract,new_contract,disable_all
+disable_all()
 
 import sys
 sys.path.append('/home/nubot/data/workspace/hand-eye/')
@@ -19,6 +19,7 @@ sys.path.append('/home/nubot/data/workspace/hand-eye/')
 
 import pycppad
 from solver2 import *
+
 
 K = np.array([[100, 0,   250],
               [0,   100, 250],
@@ -107,7 +108,7 @@ def GenerateCameraPoseOnSphere(num_pose, radius):
 
 
 
-def DrawCamera(Twc, scale=0.1):
+def DrawCamera(Twc, scale=0.1, color='b'):
   vertex = np.array([[ 0, 0, 0],
                      [-2,-1.5, 1],
                      [ 2,-1.5, 1],
@@ -122,12 +123,15 @@ def DrawCamera(Twc, scale=0.1):
 
     line1_data = np.c_[p1,p2,p3,p4,p1,p0,p3]
     line2_data = np.c_[p2,p0,p4]
-    plt.gca(projection='3d').plot(line1_data[0], line1_data[1], line1_data[2], 'b')
-    plt.gca(projection='3d').plot(line2_data[0], line2_data[1], line2_data[2], 'b')
+    plt.gca(projection='3d').plot(line1_data[0], line1_data[1], line1_data[2], color)
+    plt.gca(projection='3d').plot(line2_data[0], line2_data[1], line2_data[2], color)
 
 #new_contract('Camera', lambda obj: isinstance(obj, Camera))
 #new_contract('KeyFrame', lambda obj: isinstance(obj, KeyFrame))
 #new_contract('Mappoint', lambda obj: isinstance(obj, Mappoint))
+
+Mat = SE3Parameterization.Mat44
+Vec = SE3Parameterization.Vec12
 import networkx as nx
 from itertools import product
 class SLAMSystem(object):
@@ -159,23 +163,26 @@ class SLAMSystem(object):
 
   def Simulation(self, num_point = 100, num_pose=10, radius=2):
     for r in np.linspace(0, 1.6*np.pi, num_pose):
-      self.NewKF(t_cw=np.array([0,0,radius],'d'), r_cw=np.array([0, r,0],'d'))
+      kf = self.NewKF(t_cw=np.array([0,0,radius],'d'), r_cw=np.array([0, r,0],'d'))
+      kf.SE3 = Vec(MfromRT(np.array([0, r,0],'d'), np.array([0,0,radius],'d')))
 
     for i in xrange(num_point):
       self.NewMP(xyz_w = 2*np.random.rand(3)-1 )
 
 
-  def Draw(self):
-    fig = plt.figure(figsize=(11,11), num='slam' )
-    ax = fig.add_subplot(111, projection='3d')
-    Pw = np.vstack(mp.xyz_w for mp in self.MPs).T
-    ax.scatter(Pw[0],Pw[1],Pw[2], 'r' )
-    ax.set_xlim3d(-3,3)
-    ax.set_ylim3d(-3,3)
-    ax.set_zlim3d(-3,3)
+  def Draw(self, point=True, cam=True, color='b'):
 
-    M = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in self.KFs ]
-    DrawCamera(M)
+    fig = plt.figure(figsize=(11,11))
+    ax = fig.add_subplot(111, projection='3d')
+    if point:
+      Pw = np.vstack(mp.xyz_w for mp in self.MPs).T
+      ax.scatter(Pw[0],Pw[1],Pw[2])
+      ax.set_xlim3d(-3,3)
+      ax.set_ylim3d(-3,3)
+      ax.set_zlim3d(-3,3)
+    if cam:
+      M = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in self.KFs ]
+      DrawCamera(M, color=color)
 
 
 
@@ -193,6 +200,7 @@ class KeyFrame(object):
     self.cam  = cam
     self.t_cw = t_cw if not t_cw is None else np.empty(3,'d')
     self.r_cw = r_cw if not r_cw is None else np.empty(3,'d')
+    self.SE3  = Vec(np.eye(4))
     self.id = id
 
   def __repr__(self):
@@ -203,8 +211,9 @@ class KeyFrame(object):
     xyz_w = np.atleast_2d(xyz_w)
     if xyz_w.shape[0] != 3:
       xyz_w = xyz_w.T
-
-    xyz_c = ax2Rot(self.r_cw).dot(xyz_w) + self.t_cw.reshape(3,1)
+    M = Mat(self.SE3)
+    xyz_c = M[:3,:3].dot(xyz_w) + M[:3,3].reshape(3,1)
+#    xyz_c = ax2Rot(self.r_cw).dot(xyz_w) + self.t_cw.reshape(3,1)
     return self.cam.Project(xyz_c)
 
   @contract(u='array[N]', v='array[N]',returns='array[3xN]')
@@ -262,7 +271,7 @@ class StereoCamera(Camera):
 K = np.array([[100, 0,   250],
              [0,   100, 250],
              [0,   0,      1]],'d')
-baseline = 0.5
+baseline = None#0.5
 slam = SLAMSystem(K, baseline)
 slam.Simulation(10,3)
 slam.Draw()
@@ -284,6 +293,8 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v = kf.Project(mp.xyz_w)
+    u += np.random.rand(1)
+    v += np.random.rand(1)
     uv_id, _ = problem.AddObservation([u,v])
     slam.graph.add_edge(kf, mp, obs_u=u, obs_v=v)
 
@@ -291,6 +302,37 @@ if 0:
   problem.SetVarFixed(kf.r_cw)
   problem.SetVarFixed(kf.t_cw)
   x,le,cov = SolveWithCVX(problem, cov=True)
+#%%
+def ProjectErrorSE3(kf_se3, mp_xyz_w, kf_u, kf_v):
+  M = Mat(kf_se3)
+  Pc = M[:3,:3].dot(mp_xyz_w) + M[:3,3]
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  return np.hstack([err_u,err_v])
+
+if 1:
+  problem = GaussHelmertProblem()
+  for kf, mp in product(slam.KFs, slam.MPs):
+    if kf.id is None:
+      kf.id, _ = problem.AddParameter([kf.SE3])
+      problem.SetParameterization(kf.SE3, SE3Parameterization())
+
+    if mp.id is None:
+      mp.id, _ = problem.AddParameter([mp.xyz_w])
+    u,v = kf.Project(mp.xyz_w)
+    u += np.random.rand(1)
+    v += np.random.rand(1)
+    uv_id, _ = problem.AddObservation([u,v])
+    slam.graph.add_edge(kf, mp, obs_u=u, obs_v=v)
+
+    problem.AddConstraintWithKnownBlocks(ProjectErrorSE3, kf.id + mp.id, uv_id)
+  problem.SetVarFixed(kf.SE3)
+  x,le,fac,cov = SolveWithGEDense(problem, fac=True, cov=True)
+  print fac
+  problem.cv_x.OverWriteOrigin()
+  slam.Draw(color='r')
 
 #%%
 def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
@@ -310,6 +352,9 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v,du = kf.Project(mp.xyz_w)
+    u += np.random.rand(1)
+    v += np.random.rand(1)
+    du+= np.random.rand(1)
     uvd_id, _ = problem.AddObservation([u,v,du])
     slam.graph.add_edge(kf, mp, obs_u=u, obs_v=v, obs_du=du)
 
