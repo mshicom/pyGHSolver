@@ -25,6 +25,10 @@ K = np.array([[100, 0,   250],
               [0,   0,      1]],'d')
 K_inv = np.linalg.inv(K)
 
+def randsp(n=3):
+  v = np.random.uniform(size=n)
+  return v/norm(v)
+
 def ax2Rot(r):
   phi = np.linalg.norm(r)
   if np.abs(phi) > 1e-8:
@@ -139,6 +143,10 @@ def DrawCamera(Twc, scale=0.1, color='b'):
 #new_contract('Camera', lambda obj: isinstance(obj, Camera))
 #new_contract('KeyFrame', lambda obj: isinstance(obj, KeyFrame))
 #new_contract('Mappoint', lambda obj: isinstance(obj, Mappoint))
+def check_angel(r):
+  if np.linalg.norm(r) > np.pi:
+    raise ValueError("rotation magnitude larger than pi, will cause problems during optimizatoin")
+  return r
 
 Mat = SE3Parameterization.Mat44
 Vec = SE3Parameterization.Vec12
@@ -170,7 +178,7 @@ class SLAMSystem(object):
   def Simulation(self, num_point = 100, num_pose=10, radius=2):
     for r in np.linspace(0.01, 1.6*np.pi, num_pose):
       t_cw = np.array([0, 0, radius],'d')
-      r_cw = np.array([np.random.rand(1), r, np.random.rand(1)],'d')
+      r_cw = np.array( 0.9* np.random.rand(1)*np.pi*randsp(),'d')
 
       kf = self.NewKF(r_cw=r_cw, t_cw=t_cw)
       kf.vT_cw = Vec( MfromRT(r_cw, t_cw) )
@@ -212,7 +220,7 @@ class KeyFrame(object):
   def __init__(self, id=None, cam=None, r_cw=None, t_cw=None):
     self.cam  = cam
     self.t_cw = t_cw if not t_cw is None else np.empty(3,'d')
-    self.r_cw = r_cw if not r_cw is None else np.empty(3,'d')
+    self.r_cw = check_angel(r_cw) if not r_cw is None else np.empty(3,'d')
     self.vT_cw  = Vec(np.eye(4))
     self.id = id
 
@@ -285,7 +293,7 @@ class SE3Offset(object):
   def __init__(self, r_ab=None, t_ab=None):
     self.id = None
     self.t_ab = t_ab if not t_ab is None else np.zeros(3,'d')
-    self.r_ab = r_ab if not r_ab is None else np.zeros(3,'d')
+    self.r_ab = check_angel(r_ab) if not r_ab is None else np.empty(3,'d')
     self.vT_ab = Vec(MfromRT(self.r_ab, self.t_ab))
 
   def FromB(self, r_bw, t_bw):
@@ -312,7 +320,8 @@ class OdometryFrame(object):
   def __init__(self, se3_oc=None, r_ow=None, t_ow=None):
     self.id = None
     self.t_ow = t_ow if not t_ow is None else np.empty(3,'d')
-    self.r_ow = r_ow if not r_ow is None else np.empty(3,'d')
+    self.r_ow = check_angel(r_ow) if not r_ow is None else np.empty(3,'d')
+
     self.vT_ow = Vec( MfromRT(self.r_ow, self.t_ow) )
     self.se3_oc = se3_oc
 
@@ -324,12 +333,20 @@ K = np.array([[100, 0,   250],
               [0,   0,     1]],'d')
 baseline = None#0.5#
 slam = SLAMSystem(K, baseline)
-slam.Simulation(100,6)
+slam.Simulation(10,3)
 #slam.Draw()
 #%% ProjectError
+def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
+  check_angel(kf_r_cw)
 
-if 0:
+  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  return np.hstack([err_u,err_v])
 
+if 0 and baseline is None:
   fig = plt.figure(figsize=(11,11), num='ba')
   ax = fig.add_subplot(111, projection='3d')
   Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
@@ -339,14 +356,6 @@ if 0:
   ax.set_zlim3d(-3,3)
   cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
   DrawCamera(cam, color='b')
-
-  def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
-    Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
-    p  = K.dot(Pc)
-    uv_predict = p[:2]/p[2]
-    err_u = kf_u - uv_predict[0]
-    err_v = kf_v - uv_predict[1]
-    return np.hstack([err_u,err_v])
 
   problem = GaussHelmertProblem()
   for kf, mp in product(slam.KFs, slam.MPs):
@@ -370,17 +379,16 @@ if 0:
   DrawCamera(cam, color='r')
 
 #%% ProjectErrorSE3
-if 0:
+def ProjectErrorSE3(kf_se3, mp_xyz_w, kf_u, kf_v):
+  M = Mat(kf_se3)
+  Pc = M[:3,:3].dot(mp_xyz_w) + M[:3,3]
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  return np.hstack([err_u,err_v])
 
-  def ProjectErrorSE3(kf_se3, mp_xyz_w, kf_u, kf_v):
-    M = Mat(kf_se3)
-    Pc = M[:3,:3].dot(mp_xyz_w) + M[:3,3]
-    p  = K.dot(Pc)
-    uv_predict = p[:2]/p[2]
-    err_u = kf_u - uv_predict[0]
-    err_v = kf_v - uv_predict[1]
-    return np.hstack([err_u,err_v])
-
+if 0 and baseline is None:
   problem = GaussHelmertProblem()
   for kf, mp in product(slam.KFs, slam.MPs):
     if kf.id is None:
@@ -401,16 +409,19 @@ if 0:
 
 
 #%% StereoProjectError
-if 0:
-  def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
-    Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
-    p  = K.dot(Pc)
-    uv_predict = p[:2]/p[2]
-    err_u = kf_u - uv_predict[0]
-    err_v = kf_v - uv_predict[1]
-    err_du= kf_du - baseline*K[0,0]/Pc[2]
-    return np.hstack([err_u,err_v,err_du])
 
+def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
+  check_angel(kf_r_cw)
+
+  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+  p  = K.dot(Pc)
+  uv_predict = p[:2]/p[2]
+  err_u = kf_u - uv_predict[0]
+  err_v = kf_v - uv_predict[1]
+  err_du= kf_du - baseline*K[0,0]/Pc[2]
+  return np.hstack([err_u,err_v,err_du])
+
+if 0 and not baseline is None:
   problem = GaussHelmertProblem()
   for kf, mp in product(slam.KFs, slam.MPs):
     if kf.id is None:
@@ -425,31 +436,35 @@ if 0:
     uvd_id, _ = problem.AddObservation([u,v,du])
 
     problem.AddConstraintWithID(StereoProjectError, kf.id + mp.id, uvd_id)
+  # anchor the whole system
   problem.SetVarFixed(kf.r_cw)
   problem.SetVarFixed(kf.t_cw)
   x,le,fac = SolveWithGESparse(problem, fac=True)
   print 'variance factor:%f' % fac
 
 #%% ExtrinsicError
-if 1:
-  def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
+def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
+  check_angel(r_cw)
+  check_angel(r_oc)
+  check_angel(r_ow)
+
+  R_co = ax2Rot(r_oc).T
+  r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )
+  t_cw_est = R_co.dot(t_ow - t_oc)
+  return np.hstack([t_cw - t_cw_est, r_cw - r_cw_est])
+  def test():
+    r_oc, t_oc, r_ow, t_ow = np.random.rand(4,3)
+
+    T_cw = invT(MfromRT(r_oc, t_oc)).dot( MfromRT(r_ow, t_ow) )
+    r_cw, t_cw = Rot2ax(T_cw[:3,:3]), T_cw[:3,3]
+
     R_co = ax2Rot(r_oc).T
-    r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )
+    r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )#R_co.dot(r_ow)#
     t_cw_est = R_co.dot(t_ow - t_oc)
-    return np.hstack([t_cw - t_cw_est, r_cw - r_cw_est])
+    assert_array_equal( r_cw, r_cw_est )
+    assert_array_equal( t_cw, t_cw_est )
 
-    def test():
-      r_oc, t_oc, r_ow, t_ow = np.random.rand(4,3)
-
-      T_cw = invT(MfromRT(r_oc, t_oc)).dot( MfromRT(r_ow, t_ow) )
-      r_cw, t_cw = Rot2ax(T_cw[:3,:3]), T_cw[:3,3]
-
-      R_co = ax2Rot(r_oc).T
-      r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )#R_co.dot(r_ow)#
-      t_cw_est = R_co.dot(t_ow - t_oc)
-      assert_array_equal( r_cw, r_cw_est )
-      assert_array_equal( t_cw, t_cw_est )
-
+if 1 and baseline is None:
 
   fig = plt.figure(figsize=(11,11), num='cal')
   ax = fig.add_subplot(111, projection='3d')
@@ -462,7 +477,6 @@ if 1:
   DrawCamera(cam, color='b')
   od = [invT(MfromRT(od.r_ow, od.t_ow)) for od in slam.ODs ]
   DrawCamera(od, color='r')
-
 
   problem = GaussHelmertProblem()
   se3_id, se3_vec = problem.AddParameter([slam.offset.r_ab, slam.offset.t_ab])
@@ -479,6 +493,8 @@ if 1:
     v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
     problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
+  problem.SetVarFixed(slam.KFs[0].r_cw )
+  problem.SetVarFixed(slam.KFs[0].t_cw )
 
   x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
   print 'variance factor:%f' % fac
@@ -487,10 +503,11 @@ if 1:
   print se3_vec[0].array, se3_vec[1].array
   print slam.offset.r_ab, slam.offset.t_ab
 #%% ExtrinsicErrorSE3
-if 0:
-  def ExtrinsicErrorSE3(vT_cw, vT_oc, vT_ow):
-    T_cw_est = invT( Mat(vT_oc) ).dot( Mat(vT_ow) )
-    return Vec(T_cw_est) - vT_cw
+def ExtrinsicErrorSE3(vT_cw, vT_oc, vT_ow):
+  T_cw_est = invT( Mat(vT_oc) ).dot( Mat(vT_ow) )
+  return Vec(T_cw_est) - vT_cw
+
+if 0 and baseline is None:
 
   fig = plt.figure(figsize=(11,11), num='cal')
   ax = fig.add_subplot(111, projection='3d')
@@ -504,7 +521,6 @@ if 0:
   od = [invT( Mat(od.vT_ow) ) for od in slam.ODs ]
   DrawCamera(od, color='r')
 
-
   problem = GaussHelmertProblem()
   se3_id, se3_vec = problem.AddParameter([slam.offset.vT_ab])
   problem.SetParameterization(slam.offset.vT_ab, SE3Parameterization())
@@ -515,6 +531,7 @@ if 0:
     od.id, _ = problem.AddObservation([od.vT_ow])
     problem.SetParameterization(od.vT_ow, SE3Parameterization())
     problem.AddConstraintWithID(ExtrinsicErrorSE3, kf.id + se3_id, od.id)
+  problem.SetVarFixed(slam.KFs[0].vT_cw )
 
   for kf, mp in product(slam.KFs, slam.MPs):
     if mp.id is None:
@@ -525,10 +542,10 @@ if 0:
     uv_id, _ = problem.AddObservation([u,v])
     problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
 
-  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+#  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
 #  problem.ViewJacobianPattern()
-  print Mat(se3_vec[0].array)
-  print Mat(slam.offset.vT_ab)
+#  print Mat(se3_vec[0].array)
+#  print Mat(slam.offset.vT_ab)
 
   #%% 2D-2D ego motion
 #def EpipolarConstraint(r12, t12, p1x, p1y, p2x, p2y):
