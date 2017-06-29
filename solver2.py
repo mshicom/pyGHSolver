@@ -1654,8 +1654,39 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
 #    ret.append(factor)
 #
 #  return ret
+#%%
+def CheckJacobianFunction(g, g_jac, *args):
+  arg_sizes= [ len(vec) for vec in args ]
 
+  arg_indices= np.cumsum( arg_sizes )[:-1]
+  var       = np.hstack( args )
+  var_in    = pycppad.independent( var )
+  var_out   = np.atleast_1d( g( *np.split(var_in, arg_indices) ) )
+  var_jacobian= pycppad.adfun(var_in, var_out).jacobian
+  def g_jac_auto(*vec):
+    J = var_jacobian( np.hstack(vec) )
+    return np.split(J, arg_indices, axis=1)
 
+  tmp_jac      = list( g_jac( *args ) )
+  tmp_jac_auto = g_jac_auto( *args )
+
+  assert len(tmp_jac)==len(tmp_jac_auto)
+  for a,b in zip(tmp_jac, tmp_jac_auto):
+    assert_array_almost_equal(a,b)
+  return
+  def test():
+    def AB(vT_a, vT_b):
+      return Vec( Mat(vT_a).dot( Mat(vT_b) )  )
+    def ABJac(vT_a, vT_b):
+      Ma = SE3Parameterization.Mat44(vT_a)
+      Mb = SE3Parameterization.Mat44(vT_b)
+      Ja = np.kron( Mb.T, np.eye(3) )
+      Jb = np.kron( np.eye(4), Ma[:3,:3] )
+      return Ja,Jb
+    import geometry
+    vT_a = Vec( geometry.SE3.sample_uniform() )
+    vT_b = Vec( geometry.SE3.sample_uniform() )
+    CheckJacobianFunction(AB, ABJac, vT_a, vT_b)
 
 #%%
 if __name__ == '__main__':
