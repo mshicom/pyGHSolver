@@ -322,13 +322,13 @@ class OdometryFrame(object):
 K = np.array([[100, 0,   250],
               [0,   100, 250],
               [0,   0,     1]],'d')
-baseline = None#0.5
+baseline = None#0.5#
 slam = SLAMSystem(K, baseline)
 slam.Simulation(100,6)
 #slam.Draw()
 #%% ProjectError
 
-if 1:
+if 0:
 
   fig = plt.figure(figsize=(11,11), num='ba')
   ax = fig.add_subplot(111, projection='3d')
@@ -360,7 +360,7 @@ if 1:
     v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
 
-    problem.AddConstraintWithKnownBlocks(ProjectError, kf.id + mp.id, uv_id)
+    problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
   problem.SetVarFixed(kf.r_cw)
   problem.SetVarFixed(kf.t_cw)
   x,le,fac = SolveWithGESparse(problem, fac=True)
@@ -368,6 +368,7 @@ if 1:
   problem.cv_x.OverWriteOrigin()
   cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
   DrawCamera(cam, color='r')
+
 #%% ProjectErrorSE3
 if 0:
 
@@ -393,10 +394,10 @@ if 0:
     v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
 
-    problem.AddConstraintWithKnownBlocks(ProjectErrorSE3, kf.id + mp.id, uv_id)
+    problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
   problem.SetVarFixed(kf.vT_cw)
   x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
-  print fac
+  print 'variance factor:%f' % fac
 
 
 #%% StereoProjectError
@@ -423,13 +424,14 @@ if 0:
     du+= np.random.randn(1)
     uvd_id, _ = problem.AddObservation([u,v,du])
 
-    problem.AddConstraintWithKnownBlocks(StereoProjectError, kf.id + mp.id, uvd_id)
+    problem.AddConstraintWithID(StereoProjectError, kf.id + mp.id, uvd_id)
   problem.SetVarFixed(kf.r_cw)
   problem.SetVarFixed(kf.t_cw)
-  x,le,cov = SolveWithGESparse(problem, cov=True)
+  x,le,fac = SolveWithGESparse(problem, fac=True)
+  print 'variance factor:%f' % fac
 
 #%% ExtrinsicError
-if 0:
+if 1:
   def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
     R_co = ax2Rot(r_oc).T
     r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )
@@ -467,7 +469,7 @@ if 0:
   for kf, od in zip(slam.KFs, slam.ODs):
     kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
     od.id, _ = problem.AddObservation([od.r_ow, od.t_ow])
-    problem.AddConstraintWithKnownBlocks(ExtrinsicError, kf.id + se3_id, od.id)
+    problem.AddConstraintWithID(ExtrinsicError, kf.id + se3_id, od.id)
 
   for kf, mp in product(slam.KFs, slam.MPs):
     if mp.id is None:
@@ -476,9 +478,11 @@ if 0:
     u += np.random.randn(1)
     v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
-    problem.AddConstraintWithKnownBlocks(ProjectError, kf.id + mp.id, uv_id)
+    problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
 
   x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+  print 'variance factor:%f' % fac
+
 #  problem.ViewJacobianPattern()
   print se3_vec[0].array, se3_vec[1].array
   print slam.offset.r_ab, slam.offset.t_ab
@@ -510,7 +514,7 @@ if 0:
 
     od.id, _ = problem.AddObservation([od.vT_ow])
     problem.SetParameterization(od.vT_ow, SE3Parameterization())
-    problem.AddConstraintWithKnownBlocks(ExtrinsicErrorSE3, kf.id + se3_id, od.id)
+    problem.AddConstraintWithID(ExtrinsicErrorSE3, kf.id + se3_id, od.id)
 
   for kf, mp in product(slam.KFs, slam.MPs):
     if mp.id is None:
@@ -519,7 +523,7 @@ if 0:
     u += np.random.randn(1)
     v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
-    problem.AddConstraintWithKnownBlocks(ProjectErrorSE3, kf.id + mp.id, uv_id)
+    problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
 
   x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
 #  problem.ViewJacobianPattern()

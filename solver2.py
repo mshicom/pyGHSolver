@@ -819,7 +819,6 @@ class CompoundVector(object):
   def flat(self):
     return np.ndarray((self.tail,), buffer=self.buff)
 
-
 class CompoundVectorWithDict(CompoundVector):
   Segment = namedtuple('Segment', ['offset', 'array'])
 
@@ -924,17 +923,19 @@ class VariableBlock(object):
     self.isfixed = False
     self.param = None
     self.jac = []
+  def __repr__(self):
+    return "VariableBlock:%s, %dlinks" % (self.array, len(self.jac))
 
 class ObservationBlock(VariableBlock):
   __slots__ = 'sigma'
   def __init__(self, array):
     super(ObservationBlock, self).__init__(array)
     self.sigma = None
+  def __repr__(self):
+    return "ObservationBlock:%s, %dlinks" % (self.array, len(self.jac))
 
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
-#  VariableBlock   = namedtuple('VariableBlock'   , ['array', 'dim', 'isfixed', 'param', 'jac'])
-#  ObservationBlock= namedtuple('ObservationBlock', ['array', 'dim', 'isfixed', 'param', 'jac', 'sigma'])
 
   def __init__(self):
     self.cv_x   = CompoundVectorWithDict()
@@ -1086,85 +1087,71 @@ class GaussHelmertProblem(object):
     self.cv_dl.Flush()
 
 
-
-  def AddConstraintUsingAD(self, g, x_list, l_list):
-    x_sizes = [x.size for x in x_list]
-    l_sizes = [l.size for l in l_list]
-    xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
-
-    """ 1. Generate Jacobian function by cppad """
-    var       = np.hstack(x_list+l_list )
-    var_in    = pycppad.independent( var )
-    var_out   = np.atleast_1d( g( *np.split(var_in, xl_indices) ) )
-    var_jacobian= pycppad.adfun(var_in, var_out).jacobian
-
-    res = np.atleast_1d( g( *(x_list + l_list) ) )
-    jac = var_jacobian(var)
-    if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
-      raise RuntimeWarning("AutoDiff Not valid")
-      return
-    dim_res = len(res)
-
-    """ 2. Assign poses and mapped vectors for input parameter/observation arrays"""
-    x_ids, x_blocks = self.AddParameter(x_list)
+  def AddConstraintWithArray(self, g, x_list, l_list, g_jac=None):
+    """ 1. Assign poses and mapped vectors for input parameter/observation arrays"""
+    x_ids,x_blocks = self.AddParameter(x_list)
     l_ids,l_blocks = self.AddObservation(l_list)
-    xl_vec = [ b.array for b in x_blocks+l_blocks ]
 
-    """ 3. Compound vector for constraint residual """
-    res_off, res_vec = self.cv_res.NewSegment(dim_res)
-    dms = []
-    for b in x_blocks + l_blocks:  #'array', 'dim', 'isfixed', 'param', 'jac'
-      new_dm = DenseMatrix(res_off, 0)
-      new_dm.shape = [dim_res, 0]
-      b.jac.append( new_dm )
-      dms.append( new_dm )
+    self._add_constraint(g, g_jac, x_blocks, l_blocks)
 
-    """ 4. Generate constraint functor that use the mapped vectors """
-    def g_res():
-      res_vec[:] = g(*xl_vec)
 
-    def g_jac():
-      J = var_jacobian( np.hstack(xl_vec) )
-      jac = np.split(J, xl_indices, axis=1)
-      jac.reverse() # reversed, to pop(-1) instead of pop(0)
-      for dm in dms:
-        dm.Write( jac.pop() )
-
-    self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
-
-  def AddConstraintWithKnownBlocks(self, g, x_off, l_off):
-    x_blocks,l_blocks,x_sizes,l_sizes = [],[],[],[]
-    for x in x_off:
+  def AddConstraintWithID(self, g, x_ids, l_ids, g_jac=None):
+    x_blocks,l_blocks = [],[]
+    for x in x_ids:
       block = self.dict_parameter_block.get(x, None)
       if block is None:
         raise RuntimeError("wrong id")
       x_blocks.append(block)
-      x_sizes.append(len(block.array))
 
-    for l in l_off:
+    for l in l_ids:
       block = self.dict_observation_block.get(l, None)
       if block is None:
         raise RuntimeError("wrong id")
       l_blocks.append(block)
-      l_sizes.append(len(block.array))
 
-    xl_vec = [ b.array for b in x_blocks+l_blocks ]
+    self._add_constraint(g, g_jac, x_blocks, l_blocks)
 
-    xl_indices = np.cumsum(x_sizes + l_sizes)[:-1]
-    """ 1. Generate Jacobian function by cppad """
-    var       = np.hstack( xl_vec )
-    var_ad    = pycppad.independent( var )
-    var_jacobian= pycppad.adfun(var_ad, g( *np.split(var_ad, xl_indices) ) ).jacobian
+  def _add_constraint(self, g, g_jac, x_blocks, l_blocks):
+    xl_vec  = [ b.array  for b in x_blocks+l_blocks ]
+    xl_sizes= [ len(vec) for vec in xl_vec ]
 
-    res = g( *xl_vec )
-    jac = var_jacobian(var)
-    if not ( np.isfinite(res).all() and  np.isfinite(jac).all() ):
-      raise RuntimeWarning("AutoDiff Not valid")
-      return
-    dim_res = len(res)
+    """ 1. Generate Jacobian function by cppad if g_jac is not supplied"""
+    if g_jac is None:
+      xl_indices= np.cumsum( xl_sizes )[:-1]
+      var       = np.hstack( xl_vec )
+      var_in    = pycppad.independent( var )
+      var_out   = np.atleast_1d( g( *np.split(var_in, xl_indices) ) )
+      var_jacobian= pycppad.adfun(var_in, var_out).jacobian
+      def g_jac(*vec):
+        J = var_jacobian( np.hstack(vec) )
+        return np.split(J, xl_indices, axis=1)
 
-    """ 3. Compound vector for constraint residual """
+    """ 2. Sanity check of size and validation"""
+    tmp_res = np.atleast_1d( g( *xl_vec ) )
+    tmp_jac = list( g_jac( *xl_vec ) )
+
+    inequal_size = [j.shape != (len(tmp_res), size) for j, size in zip(tmp_jac, xl_sizes)]
+    if len(tmp_jac) != len(xl_sizes) or np.any( inequal_size ):
+      raise RuntimeError("Jacobian Size Not fit")
+    valid_value = [ np.isfinite(m).all() for m in [tmp_res] + tmp_jac ]
+    if not np.all( valid_value ):
+      raise RuntimeError("return value of function Not valid")
+    dim_res = len(tmp_res)
+
+    """ 3. Make and append compound vector for constraint residual """
     res_off, res_vec = self.cv_res.NewSegment(dim_res)
+
+    """ 4. Generate functor that use the mapped vectors to calcuate residual and jacobians"""
+    def g_residual():
+      res_vec[:] = g(*xl_vec)
+
+    def g_jacobians():
+      jac = list( g_jac( *xl_vec ) )
+      jac.reverse() # reversed, to pop(-1) instead of pop(0)
+      for dm in dms:
+        dm.Write( jac.pop() )
+
+    """ 5. Make new DenseMatrix that will hold the jacobians """
     dms = []
     for b in x_blocks + l_blocks:  #'array', 'dim', 'isfixed', 'param', 'jac'
       new_dm = DenseMatrix(res_off, 0)
@@ -1172,19 +1159,8 @@ class GaussHelmertProblem(object):
       b.jac.append( new_dm )
       dms.append( new_dm )
 
-    """ 4. Generate constraint functor that use the mapped vectors """
-    def g_res():
-      res_vec[:] = g(*xl_vec)
-
-    def g_jac():
-      J = var_jacobian( np.hstack(xl_vec) )
-      jac = np.split(J, xl_indices, axis=1)
-      jac.reverse() # reversed, to pop(-1) instead of pop(0)
-      for dm in dms:
-        dm.Write( jac.pop() )
-
-    self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_res, g_jac) )
-
+    """ 6. new record in the system"""
+    self.constraint_blocks.append( GaussHelmertProblem.ConstraintBlock(res_off, g_residual, g_jacobians) )
 
 
   def CompoundParameters(self):
@@ -1299,6 +1275,9 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
+  def UpdateX(self):
+    self.cv_x.OverWriteOrigin()
+
   def ViewJacobianPattern(self, fig=None):
 
     if None in (self.Jx, self.Jl):
@@ -1339,7 +1318,9 @@ def EqualityConstraintJac(a,b):
 def MakeAffineConstraint(A,B):
   def AffineConstraint(a, b):
     return A.dot(a) + B.dot(b)
-  return AffineConstraint
+  def AffineConstraintJac(a, b):
+    return A, B
+  return AffineConstraint, AffineConstraintJac
 
 def DiagonalRepeat(M, repeats):
   return scipy.linalg.block_diag(* (M,)*repeats )
@@ -1350,14 +1331,14 @@ def VerticalRepeat(M, repeats):
 def HorizontalRepeat(M, repeats):
   return np.tile( M, (1, repeats) )
 
-def test_ProblemJacobian():
+def test_ProblemBasic():
   dim_x, num_x = 3, 2
   dim_l, num_l = 4, 30*num_x
 
   dim_g = 3
   A = np.random.rand(dim_g, dim_x)
   B = np.random.rand(dim_g, dim_l)
-  AffineConstraint = MakeAffineConstraint(A,B)
+  AffineConstraint, AffineConstraintJac = MakeAffineConstraint(A,B)
 
   x = np.zeros((num_x, dim_x))
   l = [ np.ones((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
@@ -1365,9 +1346,9 @@ def test_ProblemJacobian():
   problem = GaussHelmertProblem()
   for i in range(num_x):
     for j in range(num_l/num_x):
-      problem.AddConstraintUsingAD(AffineConstraint,
-                                   [ x[i] ],
-                                   [ l[i][j] ])
+      problem.AddConstraintWithArray(AffineConstraint,
+                                     [ x[i] ],
+                                     [ l[i][j] ])
       problem.SetSigma(l[i][j], np.diag(sigma))
   problem.SetUp()
 
@@ -1391,7 +1372,7 @@ def test_ProblemJacobian():
 
   # OverWriteOrigin
   xc[:] = 1
-  problem.cv_x.OverWriteOrigin()
+  problem.UpdateX()
   assert_array_equal(x, np.ones((num_x, dim_x)))
 
   # Create Jacobian
@@ -1408,7 +1389,23 @@ def test_ProblemJacobian():
   Sig, W = problem.MakeSigmaAndWeightMatrix()
   assert_array_equal(Sig.todense(), DiagonalRepeat(np.diag(sigma), num_l) )
   assert_array_equal( W.todense(), DiagonalRepeat(np.diag(1./sigma), num_l) )
-  print "test_ProblemJacobian passed"
+
+  # DIY Jacobian and AddConstraintWithID
+  problem2 = GaussHelmertProblem()
+  for i in range(num_x):
+    xid, _ = problem2.AddParameter([ x[i] ])
+    for j in range(num_l/num_x):
+      lid, _ = problem2.AddObservation([ l[i][j] ])
+      problem2.AddConstraintWithID(AffineConstraint,
+                                   xid,
+                                   lid,
+                                   AffineConstraintJac )
+  problem2.SetUp()
+  Jx2,Jl2 = problem2.MakeJacobians()
+  problem2.UpdateJacobian()
+  assert_array_equal( Jx2.A, DiagonalRepeat( VerticalRepeat(A, num_l/num_x), num_x) )
+  assert_array_equal( Jl2.A, DiagonalRepeat(B, num_l) )
+  print "test_ProblemBasic passed"
 
 
 def test_ProblemMakeKKT():
@@ -1417,7 +1414,7 @@ def test_ProblemMakeKKT():
   problem = GaussHelmertProblem()
   x = np.ones(2)
   l = np.full(2, 2.)
-  problem.AddConstraintUsingAD(DumpXLConstraint, [x], [l])
+  problem.AddConstraintWithArray(DumpXLConstraint, [x], [l])
   problem.SetSigma(l, 0.5*np.eye(2))
   problem.SetUp()
   res  = problem.CompoundResidual()
@@ -1454,15 +1451,18 @@ def test_FixAndParameterization():
 
   x = np.ones((2, 3))
   l = [np.random.rand(100,3) for _ in range(2)]
-  def iden(x,l):
+  def IdentityConstraint(x,l):
     return x-l
+  def IdentityConstraintJac(x,l):
+    I = np.eye(len(x))
+    return I, -I
   x2_true = [np.average(l[1][:,0]), 1, l[1][-1,2]]
 
 
   problem = GaussHelmertProblem()
   for i in range(2):
     for j in range(l[0].shape[0]):
-      problem.AddConstraintUsingAD(iden, [x[i]], [l[i][j]])
+      problem.AddConstraintWithArray(IdentityConstraint, [x[i]], [l[i][j]])
   problem.SetVarFixed(x[0])
   problem.SetParameterization(x[1], SubsetParameterization([1,0,1]))
   problem.SetParameterization(l[1][-1], SubsetParameterization([1,1,0]))
@@ -1681,7 +1681,7 @@ if __name__ == '__main__':
 
   test_ArrayID()
   test_CompoundVector()
-  test_ProblemJacobian()
+  test_ProblemBasic()
   test_ProblemMakeKKT()
   test_FixAndParameterization()
 
@@ -1697,7 +1697,7 @@ if __name__ == '__main__':
       bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
       problem = GaussHelmertProblem()
       for i in range(num_l):
-        problem.AddConstraintUsingAD(lambda x,y:x-y,
+        problem.AddConstraintWithArray(lambda x,y:x-y,
                                      [ a ],
                                      [ bs[i] ])
         problem.SetSigma(bs[i], s)
@@ -1718,7 +1718,7 @@ if __name__ == '__main__':
     l0 = Vec(T0)
     x0 = Vec(np.eye(4))
     problem = GaussHelmertProblem()
-    problem.AddConstraintUsingAD(InvR, [x0], [l0])
+    problem.AddConstraintWithArray(InvR, [x0], [l0])
     problem.SetParameterization(x0, SE3Parameterization())
     problem.SetParameterization(l0, SE3Parameterization())
 
