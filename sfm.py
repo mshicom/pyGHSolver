@@ -324,11 +324,22 @@ K = np.array([[100, 0,   250],
               [0,   0,     1]],'d')
 baseline = None#0.5
 slam = SLAMSystem(K, baseline)
-slam.Simulation(10,3)
+slam.Simulation(100,6)
 #slam.Draw()
 #%% ProjectError
 
-if 0:
+if 1:
+
+  fig = plt.figure(figsize=(11,11), num='ba')
+  ax = fig.add_subplot(111, projection='3d')
+  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
+  ax.scatter(Pw[0],Pw[1],Pw[2])
+  ax.set_xlim3d(-3,3)
+  ax.set_ylim3d(-3,3)
+  ax.set_zlim3d(-3,3)
+  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+  DrawCamera(cam, color='b')
+
   def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
     Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
     p  = K.dot(Pc)
@@ -345,15 +356,18 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v = kf.Project(mp.xyz_w)
-    u += np.random.rand(1)
-    v += np.random.rand(1)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
 
     problem.AddConstraintWithKnownBlocks(ProjectError, kf.id + mp.id, uv_id)
   problem.SetVarFixed(kf.r_cw)
   problem.SetVarFixed(kf.t_cw)
-  x,le,cov = SolveWithGESparse(problem, cov=True)
-
+  x,le,fac = SolveWithGESparse(problem, fac=True)
+  print 'variance factor:%f' % fac
+  problem.cv_x.OverWriteOrigin()
+  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+  DrawCamera(cam, color='r')
 #%% ProjectErrorSE3
 if 0:
 
@@ -375,8 +389,8 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v = kf.Project(mp.xyz_w)
-    u += np.random.rand(1)
-    v += np.random.rand(1)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
 
     problem.AddConstraintWithKnownBlocks(ProjectErrorSE3, kf.id + mp.id, uv_id)
@@ -404,9 +418,9 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v,du = kf.Project(mp.xyz_w)
-    u += np.random.rand(1)
-    v += np.random.rand(1)
-    du+= np.random.rand(1)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
+    du+= np.random.randn(1)
     uvd_id, _ = problem.AddObservation([u,v,du])
 
     problem.AddConstraintWithKnownBlocks(StereoProjectError, kf.id + mp.id, uvd_id)
@@ -459,8 +473,8 @@ if 0:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v = kf.Project(mp.xyz_w)
-    u += np.random.rand(1)
-    v += np.random.rand(1)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
     problem.AddConstraintWithKnownBlocks(ProjectError, kf.id + mp.id, uv_id)
 
@@ -469,7 +483,7 @@ if 0:
   print se3_vec[0].array, se3_vec[1].array
   print slam.offset.r_ab, slam.offset.t_ab
 #%% ExtrinsicErrorSE3
-if 1:
+if 0:
   def ExtrinsicErrorSE3(vT_cw, vT_oc, vT_ow):
     T_cw_est = invT( Mat(vT_oc) ).dot( Mat(vT_ow) )
     return Vec(T_cw_est) - vT_cw
@@ -502,8 +516,8 @@ if 1:
     if mp.id is None:
       mp.id, _ = problem.AddParameter([mp.xyz_w])
     u,v = kf.Project(mp.xyz_w)
-    u += np.random.rand(1)
-    v += np.random.rand(1)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
     problem.AddConstraintWithKnownBlocks(ProjectErrorSE3, kf.id + mp.id, uv_id)
 
