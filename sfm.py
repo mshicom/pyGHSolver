@@ -20,33 +20,38 @@ sys.path.append('/home/nubot/data/workspace/hand-eye/')
 import pycppad
 from solver2 import *
 
-
 K = np.array([[100, 0,   250],
               [0,   100, 250],
               [0,   0,      1]],'d')
 K_inv = np.linalg.inv(K)
-def skew(v):
-    return np.array([[   0, -v[2],  v[1]],
-                     [ v[2],    0, -v[0]],
-                     [-v[1], v[0],    0 ]])
 
 def ax2Rot(r):
-    p = np.linalg.norm(r)
-    if np.abs(p) < 1e-12:
-        return np.eye(3)
-    else:
-        S = skew(r/p)
-        return np.eye(3) + np.sin(p)*S + (1.0-np.cos(p))*S.dot(S)
+  phi = np.linalg.norm(r)
+  if np.abs(phi) > 1e-8:
+    sinp_div_p             = np.sin(phi)/phi
+    one_minus_cos_p_div_pp = (1.0-np.cos(phi))/(phi**2)
+  else:
+    sinp_div_p             = 1. - phi**2/6.0 + phi**4/120.0
+    one_minus_cos_p_div_pp = 0.5 - phi**2/24.0 + phi**4/720.0
+
+  S = np.array([[   0, -r[2],  r[1]],
+                [ r[2],    0, -r[0]],
+                [-r[1], r[0],    0 ]])
+
+  return np.eye(3) + sinp_div_p*S + one_minus_cos_p_div_pp*S.dot(S)
+
 
 def Rot2ax(R):
-    tr = np.trace(R)
-    a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
-    an = np.linalg.norm(a)
-    phi= np.arctan2(an, tr-1.)
-    if np.abs(phi) < 1e-12:
-        return np.zeros(3,'d')
+    tr = 0.5*(np.trace(R)-1)
+    phi= np.arccos(tr)
+    if np.abs(phi) > 1e-8:
+      p_div_sinp = phi/np.sin(phi)
     else:
-        return phi/an*a
+      p_div_sinp = 1 + phi**2 / 6.0 + 7.0/360 * phi**4
+
+    ln = (0.5*p_div_sinp)*(R-R.T)
+    return np.array([ln[2,1], ln[0,2], ln[1,0]])
+
 
 def MfromRT(r,t):
     T = np.eye(4)
