@@ -162,7 +162,8 @@ def skew(v):
 import scipy
 class SE3Parameterization(LocalParameterization):
   """ se(3) = [t, omega]
-  https://pixhawk.org/_media/dev/know-how/jlblanco2010geometry3d_techrep.pdf
+  A tutorial on SE(3) transformation parameterizations and on-manifold optimization
+  [https://pixhawk.org/_media/dev/know-how/jlblanco2010geometry3d_techrep.pdf]
   """
   @staticmethod
   def Vec12(T): # column major flat

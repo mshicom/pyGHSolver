@@ -13,7 +13,7 @@ import scipy.sparse
 import scipy.sparse.linalg
 
 from collections import namedtuple
-np.set_printoptions(precision=4, linewidth=120)
+np.set_printoptions(precision=3, linewidth=90)
 from numpy.testing import *
 from itertools import chain
 
@@ -1655,7 +1655,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
 #
 #  return ret
 #%%
-def CheckJacobianFunction(g, g_jac, *args):
+def CheckJacobianFunction(g, g_jac=None, *args):
   arg_sizes= [ len(vec) for vec in args ]
 
   arg_indices= np.cumsum( arg_sizes )[:-1]
@@ -1667,6 +1667,9 @@ def CheckJacobianFunction(g, g_jac, *args):
     J = var_jacobian( np.hstack(vec) )
     return np.split(J, arg_indices, axis=1)
 
+  if g_jac is None:
+    return g_jac_auto
+
   tmp_jac      = list( g_jac( *args ) )
   tmp_jac_auto = g_jac_auto( *args )
 
@@ -1674,6 +1677,7 @@ def CheckJacobianFunction(g, g_jac, *args):
   for a,b in zip(tmp_jac, tmp_jac_auto):
     assert_array_almost_equal(a,b)
   return
+
   def test():
     def AB(vT_a, vT_b):
       return Vec( Mat(vT_a).dot( Mat(vT_b) )  )

@@ -155,7 +155,7 @@ from itertools import product
 class SLAMSystem(object):
   def __init__(self, K, baseline=None):
     self.cam = Camera(K) if baseline is None else StereoCamera(K,baseline)
-    self.offset = SE3Offset( r_ab=np.array([0.0, 0.5, 0]), t_ab=np.array([0, 0, 1]) )
+    self.offset = SE3Offset( r_ab=np.array([0.0, 0.5, 0.]), t_ab=np.array([0., 0., 1.]) )
     self.KFs = []
     self.MPs = []
     self.ODs = []
@@ -333,7 +333,7 @@ K = np.array([[100, 0,   250],
               [0,   0,     1]],'d')
 baseline = None#0.5#
 slam = SLAMSystem(K, baseline)
-slam.Simulation(10,3)
+slam.Simulation(100,30)
 #slam.Draw()
 #%% ProjectError
 def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
@@ -482,8 +482,12 @@ if 1 and baseline is None:
   se3_id, se3_vec = problem.AddParameter([slam.offset.r_ab, slam.offset.t_ab])
   for kf, od in zip(slam.KFs, slam.ODs):
     kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
-    od.id, _ = problem.AddObservation([od.r_ow, od.t_ow])
+    od.id, (r,t) = problem.AddObservation([od.r_ow, od.t_ow])
+    r.array += 0.02*np.random.randn(3)
+    t.array += 0.1*np.random.randn(3)
     problem.AddConstraintWithID(ExtrinsicError, kf.id + se3_id, od.id)
+    problem.SetSigma(od.r_ow, 0.02**2*np.eye(3))
+    problem.SetSigma(od.t_ow,  0.1**2*np.eye(3))
 
   for kf, mp in product(slam.KFs, slam.MPs):
     if mp.id is None:
