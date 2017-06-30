@@ -328,12 +328,12 @@ class OdometryFrame(object):
   def __repr__(self):
     return "OdometryFrame(%s:%s,%s)" % (self.id, self.t_ow, self.r_ow)
 #%
-K = np.array([[100, 0,   250],
-              [0,   100, 250],
-              [0,   0,     1]],'d')
-baseline = None#0.5#
-slam = SLAMSystem(K, baseline)
-slam.Simulation(100,30)
+#K = np.array([[100, 0,   250],
+#              [0,   100, 250],
+#              [0,   0,     1]],'d')
+#baseline = None#0.5#
+#slam = SLAMSystem(K, baseline)
+#slam.Simulation(100,30)
 #slam.Draw()
 #%% ProjectError
 def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
@@ -415,10 +415,11 @@ def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
 
   Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
   p  = K.dot(Pc)
-  uv_predict = p[:2]/p[2]
+  z_inv = 1/p[2]
+  uv_predict = p[:2]*z_inv
   err_u = kf_u - uv_predict[0]
   err_v = kf_v - uv_predict[1]
-  err_du= kf_du - baseline*K[0,0]/Pc[2]
+  err_du= kf_du - baseline*K[0,0]*z_inv
   return np.hstack([err_u,err_v,err_du])
 
 if 0 and not baseline is None:
@@ -464,7 +465,7 @@ def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
     assert_array_equal( r_cw, r_cw_est )
     assert_array_equal( t_cw, t_cw_est )
 
-if 1 and baseline is None:
+if 0 and baseline is None:
 
   fig = plt.figure(figsize=(11,11), num='cal')
   ax = fig.add_subplot(111, projection='3d')
@@ -550,6 +551,121 @@ if 0 and baseline is None:
 #  problem.ViewJacobianPattern()
 #  print Mat(se3_vec[0].array)
 #  print Mat(slam.offset.vT_ab)
+
+#%% orbslam
+if 1:
+
+  import sys
+  sys.path.append("/home/nubot/data/workspace/ORB_SLAM2/src/swig")
+  import cv2
+  import orbslam
+
+  if not 'tracker' in vars() or 0:
+    base_dir = "/home/nubot/data/workspace/ORB_SLAM2/"
+    pic_l_path = "/home/nubot/data/Kitti/image_0/%06d.png"
+    pic_r_path = "/home/nubot/data/Kitti/image_1/%06d.png"
+    plt.imread(pic_l_path % 0)
+
+    tracker = orbslam.System( base_dir + "Vocabulary/ORBvoc.bin",
+                              base_dir + "Examples/Stereo/KITTI00-02.yaml",
+                              orbslam.System.STEREO,
+                              True)
+    for i in range(50):
+      im_l = cv2.imread( pic_l_path % i )
+      im_r = cv2.imread( pic_r_path % i )
+      tracker.TrackStereo(im_l, im_r, i)
+      print i
+#%%
+
+  def GenEdgeStereoSE3ProjectXYZ(fx,fy,cx,cy,bf):
+    def EdgeStereoSE3ProjectXYZ(pw_xyz, Rcw, Tcw, pc_xyx ):
+      pc_xyz = ax2Rot(Rcw).dot(pw_xyz) + Tcw
+      invZ = 1.0/pc_xyz[2]
+
+      xl = pc_xyz[0]*invZ*fx + cx
+      yl = pc_xyz[1]*invZ*fy + cy
+      xr = xl - bf*invZ    # bf = baseline * f_x
+      return pc_xyx - np.hstack([xl,yl,xr])
+    return EdgeStereoSE3ProjectXYZ
+  EdgeStereoSE3ProjectXYZ = GenEdgeStereoSE3ProjectXYZ(718.86, 718.86, 607.19, 185.21, 386.14)
+
+  class OrbSLAMProblem(GaussHelmertProblem):
+    def __init__(self):
+      self.kf_dict = {}
+      self.mp_dict = {}
+      super(OrbSLAMProblem, self).__init__()
+
+    def FindOrAddKeyFramePosParameter(self, kf):
+      id = kf.mnId
+      kf_xid = self.kf_dict.get(id, None)
+      if not kf_xid is None:
+        return kf_xid
+
+      kf_pos = kf.GetPose()
+      r, t   = Rot2ax(kf_pos[:3,:3]), kf_pos[:3,3].ravel()
+      kf_xid, _ = self.AddParameter([ r,t ])
+      self.kf_dict[id] = kf_xid
+      return kf_xid
+
+    def FindOrAddMapPointParameter(self, mp):
+      id = mp.mnId
+      mp_xid = self.mp_dict.get(id, None)
+
+      if not mp_xid is None:
+        return mp_xid
+
+      mp_pos = mp.GetWorldPos().ravel()
+      mp_xid, _ = self.AddParameter([mp_pos])
+      self.mp_dict[id] = mp_xid
+      return mp_xid
+
+  kfs = list(tracker.mpMap.GetAllKeyFrames())
+  mps = list(tracker.mpMap.GetAllMapPoints())
+
+  problem = OrbSLAMProblem()
+  kf0 = kfs[0]
+  # Local KeyFrames: First Breath Search from Current Keyframe
+  local_kfs = { kf.mnId: kf for kf in kf0.GetVectorCovisibleKeyFrames() if not kf0.isBad() }
+
+  # Local MapPoints seen in Local KeyFrames
+  local_mps = {}
+  for kf in local_kfs.values():
+    mp_dict = { mp.mnId : mp for mp in kf0.GetMapPointMatches() if mp and not mp.isBad() }
+    local_mps.update( mp_dict )
+    print len(local_mps)
+
+  # Fixed Keyframes. Keyframes that see Local MapPoints but that are not Local Keyframes
+  all_kfs = {}
+  for mp in local_mps.values():
+    all_kfs.update( { kf.mnId: kf for kf, _ in mp.GetObservations().items() if not kf0.isBad() } )
+  fixed_kfs = set(all_kfs) - set(local_kfs)
+
+  for kfid, kf in all_kfs.items():
+    kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
+    if kfid in fixed_kfs:
+      map(problem.SetVarFixedWithID, kf_xid)
+
+  for mp in local_mps.values():
+    mp_xid = problem.FindOrAddMapPointParameter(mp)
+
+    for kf, kp_id in mp.GetObservations().items():
+      keypoint = kf.mvKeysUn[kp_id]
+      kp_x_r = kf.mvuRight[kp_id]
+      if kp_x_r<0:
+        continue
+      kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
+
+      pc_xyx = np.r_[keypoint.pt.x, keypoint.pt.y, kp_x_r]
+      l_xid, _ = problem.AddObservation([ pc_xyx ] )
+
+      sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
+
+      problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
+      problem.SetSigma(pc_xyx, sigma)
+
+  x, err = SolveWithGESparse(problem)
+  problem.ViewJacobianPattern()
+
 
   #%% 2D-2D ego motion
 #def EpipolarConstraint(r12, t12, p1x, p1y, p2x, p2y):
