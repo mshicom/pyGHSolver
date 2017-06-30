@@ -953,6 +953,7 @@ class GaussHelmertProblem(object):
 
     self.dict_parameter_block = OrderedDict()
     self.dict_observation_block = OrderedDict()
+    self.dicts = {0: self.dict_parameter_block, 1:self.dict_observation_block}
 
   def AddParameter(self, x_list):
     id = []
@@ -980,38 +981,62 @@ class GaussHelmertProblem(object):
       blocks.append(obj)
     return id, blocks
 
-  def SetVarFixed(self, array):
-    id, _ = self.cv_x.FindVector(array)
-    if id in self.dict_parameter_block:
-      self.dict_parameter_block[id].isfixed = True
-      return
+  def SetVarFixedWithID(self, array_id, which=None):
+    if not which is None:
+      self.dicts[which][array_id].isfixed = True
+    else:
+      try:
+        self.dict_parameter_block[array_id].isfixed = True
+        return
+      except KeyError: pass # try next
+      try:
+        self.dict_observation_block[array_id].isfixed = True
+        return
+      except KeyError:
+        raise ValueError("array not found")
 
-    id, _ = self.cv_l.FindVector(array)
-    if id in self.dict_observation_block:
-      self.dict_observation_block[id].isfixed = True
-      return
+  def SetSigmaWithID(self, array_id, sigma):
+    try:
+      self.dict_observation_block[array_id].sigma = sigma
+    except KeyError:
+      raise ValueError("array not found")
+
+  def SetParameterizationWithID(self, array_id, param, which=None):
+    if not which is None:
+      self.dicts[which][array_id].param = param
+    else:
+      try:
+        self.dict_parameter_block[array_id].param = param
+        return
+      except KeyError: pass # try next
+      try:
+        self.dict_observation_block[array_id].param = param
+        return
+      except KeyError:
+        raise ValueError("array not found")
+
+  def LookupArrayID(self, array):
+    array_id, _ = self.cv_x.FindVector(array)
+    if not array_id is None:
+      return array_id, 0
+
+    array_id, _ = self.cv_l.FindVector(array)
+    if not array_id is None:
+      return array_id, 1
     raise ValueError("array not found")
+
+  def SetVarFixed(self, array):
+    array_id, which_var = self.LookupArrayID(array)
+    return self.SetVarFixedWithID(array_id, which_var)
 
   def SetSigma(self, array, sigma):
-    id, _ = self.cv_l.FindVector(array)
-    if id in self.dict_observation_block:
-      self.dict_observation_block[id].sigma = sigma
-      return
-    raise ValueError("array not found")
+    array_id, _ = self.cv_l.FindVector(array)
+    self.SetSigmaWithID(array_id, sigma)
 
   def SetParameterization(self, array, param):
-    id, _ = self.cv_x.FindVector(array)
-    if id in self.dict_parameter_block:
-      b = self.dict_parameter_block[id]
-      b.param = param
-      return
+    array_id, which_var = self.LookupArrayID(array)
+    return self.SetParameterizationWithID(array_id, param, which_var)
 
-    id, _ = self.cv_l.FindVector(array)
-    if id in self.dict_observation_block:
-      b = self.dict_observation_block[id].param = param
-      b.param = param
-      return
-    raise ValueError("array not found")
 
   def SetUp(self):
     """ reset everything"""
@@ -1292,7 +1317,6 @@ class GaussHelmertProblem(object):
     img_B = np.ones(B.shape, 'u8')
     img_B[B.row, B.col] = np.logical_not(B.data)
 
-    plt.figure()
     plt.matshow(np.hstack([img_A,img_B]))
     plt.pause(0.001)
 
