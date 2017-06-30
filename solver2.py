@@ -934,6 +934,10 @@ class ObservationBlock(VariableBlock):
   def __repr__(self):
     return "ObservationBlock:%s, %dlinks" % (self.array, len(self.jac))
 
+def check_nan(x):
+  assert np.all( np.isfinite(x) )
+  return x
+
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
 
@@ -1174,7 +1178,7 @@ class GaussHelmertProblem(object):
       jac = list( g_jac( *xl_vec ) )
       jac.reverse() # reversed, to pop(-1) instead of pop(0)
       for dm in dms:
-        dm.Write( jac.pop() )
+        dm.Write( check_nan( jac.pop() ) )
 
     """ 5. Make new DenseMatrix that will hold the jacobians """
     dms = []
@@ -1303,7 +1307,7 @@ class GaussHelmertProblem(object):
   def UpdateX(self):
     self.cv_x.OverWriteOrigin()
 
-  def ViewJacobianPattern(self, fig=None):
+  def ViewJacobianPattern(self, withB=False, fig=None):
     if None in (self.Jx, self.Jl):
       return
     A,B = self.Jx, self.Jl
@@ -1311,13 +1315,14 @@ class GaussHelmertProblem(object):
       A = A.tocoo()
     img_A = np.ones(A.shape, 'u8')
     img_A[A.row, A.col] = np.logical_not(A.data)
+    plt.matshow(img_A)
 
-    if not scipy.sparse.isspmatrix_coo(B):
-      B = B.tocoo()
-    img_B = np.ones(B.shape, 'u8')
-    img_B[B.row, B.col] = np.logical_not(B.data)
-
-    plt.matshow(np.hstack([img_A,img_B]))
+    if withB:
+      if not scipy.sparse.isspmatrix_coo(B):
+        B = B.tocoo()
+      img_B = np.ones(B.shape, 'u8')
+      img_B[B.row, B.col] = np.logical_not(B.data)
+      plt.matshow(img_B)
     plt.pause(0.001)
 
 #%%
@@ -1619,6 +1624,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
   ret = [xc, le]
   if fac:
     factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
     covariance = Sxx_factor.inv()
