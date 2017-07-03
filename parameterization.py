@@ -316,6 +316,12 @@ def NullSpaceForVector(x):
     Q,R = np.linalg.qr(x.reshape(-1,1), 'complete')
     return Q[:, 1:].T
 
+def HomoVectorCollinearError(x, y):
+  """  err = NullSpaceForVector(x).dot(y) """
+  v, beta = ComputeHouseholderVector(x)
+  err = y -  v * ( beta * v.dot(y) )
+  return err[:-1]
+
 class SphereParameterization(LocalParameterization):
   """ This provides a parameterization for homogeneous vectors which are commonly
    used in Structure for Motion problems.  One example where they are used is
@@ -371,8 +377,8 @@ class SphereParameterization(LocalParameterization):
           y = [sinc(|v|/2) * v/2 , cos(|v|/2)]
     """
     norm_v_half = 0.5*np.linalg.norm(v)
-    if 2*norm_v_half > np.pi:
-      raise ValueError("SphereParameterization meant to be worked with vector length < np.pi ")
+#    if 2*norm_v_half > np.pi:
+#      raise ValueError("SphereParameterization meant to be worked with vector length < np.pi ")
     y = np.hstack([ sinc_smooth(norm_v_half) * 0.5 * v, np.cos(norm_v_half) ])
     return y
 
@@ -482,6 +488,11 @@ class HomogeneousParameterization(LocalParameterization):
     return y
 
   @staticmethod
+  def ToSphere(y):
+    """ spherecal normalize it, i.e, |y|=1"""
+    return y/np.linalg.norm(y)
+
+  @staticmethod
   def ToEuclidean(y):
     return y[:-1]/y[-1]
 
@@ -515,17 +526,17 @@ def test_HomogeneousParameterization():
   print "test_HomogeneousParameterization passed "
 
 def test_HomogeneousParameterization_solve():
-  pa = HomogeneousParameterization(2)
+  pa = HomogeneousParameterization(3)
   def iden(x, y):
     return NullSpaceForVector( pa.ToHomoSphere(y) ).dot( x )
 
-  x = pa.ToHomoSphere( 120 )
+  x = pa.ToHomoSphere( [120., 120.] )
 
-  sigma = np.atleast_2d( 2.**2 )
+  sigma = 2.**2 * np.eye(2)
   facs = np.empty(100)
-  xs   = np.empty(facs.shape+(2,))
+  xs   = np.empty(facs.shape+(3,))
   for it in range(len(facs)):
-    y = [ 120 + 2.*np.random.randn(1) for _ in range(200) ]
+    y = [ 120 + 2.*np.random.randn(2) for _ in range(200) ]
     problem = solver2.GaussHelmertProblem()
 
     for i in range(len(y)):
@@ -536,8 +547,34 @@ def test_HomogeneousParameterization_solve():
     xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
-  assert_approx_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs] ), 120.0, significant=3)
+  assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
   print "test_HomogeneousParameterization_solve passed "
+
+def test_HomogeneousParameterization_solve2():
+  pa = HomogeneousParameterization(3)
+  def iden(x, y):
+    return pa.ToEuclidean(x) - y
+
+  x = pa.ToHomoSphere( [120., 120.] )
+
+  sigma = 2.**2 * np.eye(2)
+  facs = np.empty(100)
+  xs   = np.empty(facs.shape+(3,))
+  for it in range(len(facs)):
+    y = [ 120 + 2.*np.random.randn(2) for _ in range(200) ]
+    problem = solver2.GaussHelmertProblem()
+
+    for i in range(len(y)):
+      problem.AddConstraintWithArray(iden, [x], [y[i]])
+      problem.SetSigma(y[i], sigma)
+    problem.SetParameterization(x, pa )
+
+    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+
+  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
+  assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
+  print "test_HomogeneousParameterization_solve passed "
+
 
 if __name__ == '__main__':
   test_SubsetParameterization()

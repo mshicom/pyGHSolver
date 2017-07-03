@@ -229,14 +229,17 @@ class KeyFrame(object):
     return "KeyFrame(%s:%s,%s)" % (self.id, self.t_cw, self.r_cw)
 
   @contract(xyz_w='array[3] | array[3xN] | list[3](number)')
-  def Project(self, xyz_w):
+  def Project(self, xyz_w, noK=False):
     xyz_w = np.atleast_2d(xyz_w)
     if xyz_w.shape[0] != 3:
       xyz_w = xyz_w.T
     M = Mat(self.vT_cw)
     xyz_c = M[:3,:3].dot(xyz_w) + M[:3,3].reshape(3,1)
 #    xyz_c = ax2Rot(self.r_cw).dot(xyz_w) + self.t_cw.reshape(3,1)
-    return self.cam.Project(xyz_c)
+    if noK:
+      return xyz_c[0]/xyz_c[-1], xyz_c[1]/xyz_c[-1]
+    else:
+      return self.cam.Project(xyz_c)
 
   @contract(u='array[N]', v='array[N]',returns='array[3xN]')
   def BackProject(self, u, v):
@@ -334,7 +337,7 @@ K = np.array([[100, 0,   250],
               [0,   0,     1]],'d')
 baseline = None#0.5#
 slam = SLAMSystem(K, baseline)
-slam.Simulation(50,5)
+slam.Simulation(15,2)
 #slam.Draw()
 #%% ProjectError
 def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
@@ -409,16 +412,21 @@ if 0 and baseline is None:
   print 'variance factor:%f' % fac
 
 #%% ProjectErrorHomo
+h4 = HomogeneousParameterization(4)
+s4 = SphereParameterization(4)
+h3 = HomogeneousParameterization(3)
+
+#def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
+#  check_magnitude(kf_r_cw)
+#  ray_obs = np.hstack([kf_u, kf_v])
+#  ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
+#  return ray_est[:2]/ray_est[-1] - ray_obs
 
 def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
   check_magnitude(kf_r_cw)
-
-  ray_obs = K_inv.dot( np.hstack( [kf_u, kf_v, 1.0] ) )
-#  ray_obs /= np.linalg.norm(ray_obs)
-
+  ray_obs = np.hstack([kf_u, kf_v, 1.])
   ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
-#  ray_est /= np.linalg.norm(ray_est)
-  return NullSpaceForVector(ray_obs).dot(ray_est)
+  return HomoVectorCollinearError(ray_obs, ray_est)
 
 if 1 and baseline is None:
   fig = plt.figure(figsize=(11,11), num='ba')
@@ -437,11 +445,11 @@ if 1 and baseline is None:
       kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
 
     if mp.id is None:
-      mp.id, _ = problem.AddParameter([mp.homo_w])
-      problem.SetParameterizationWithID(mp.id[0], HomogeneousParameterization(4))
-    u,v = kf.Project(mp.xyz_w)
-    u += np.random.randn(1)
-    v += np.random.randn(1)
+      mp.id, _ = problem.AddParameter([h4.ToHomoSphere(mp.xyz_w)])
+      problem.SetParameterizationWithID(mp.id[0], h4)
+    u,v = kf.Project(mp.xyz_w, True)
+    u += 0.1*np.random.randn(1)
+    v += 0.1*np.random.randn(1)
     uv_id, _ = problem.AddObservation([u,v])
 
     problem.AddConstraintWithID(ProjectErrorHomo, kf.id + mp.id, uv_id)
