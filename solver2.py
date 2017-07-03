@@ -935,10 +935,12 @@ class ObservationBlock(VariableBlock):
     return "ObservationBlock:%s, %dlinks" % (self.array, len(self.jac))
 
 def check_nan(x):
-  assert np.all( np.isfinite(x) )
+  if not np.all( np.isfinite(x) ):
+    raise ValueError("invalid value")
   return x
 def check_allzero(x):
-  assert not np.all( x == 0 )
+  if np.all( x == 0 ):
+    raise ValueError("all zero")
   return x
 
 class GaussHelmertProblem(object):
@@ -1586,7 +1588,7 @@ def SolveWithGEDense(problem, fac=False, cov=False):
   return ret
 
 from sksparse.cholmod import cholesky,CholmodNotPositiveDefiniteError
-def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
+def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   problem.SetUp()
   res  = problem.CompoundResidual()
   lc   = problem.CompoundObservation()
@@ -1620,7 +1622,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False):
       Sxx_factor.cholesky_inplace(ATWA)
     dx  = Sxx_factor.solve_A( Cg * F )  #np.linalg.solve(ATWA,  ATW.dot(Cg))
 
-    if np.abs(dx).max() < 1e-6:
+    if np.abs(dx).max() < dx_thres:
       break
     lag = Sgg_factor.solve_A( A * dx - Cg ) # BSBT*lambda = A*dx - Cg
     dl  = -Sigma * (lag * B) - le  # B.T * lag
