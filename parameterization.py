@@ -9,6 +9,7 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 
+import solver2
 
 from abc import ABCMeta, abstractmethod
 class LocalParameterization(object):
@@ -48,6 +49,11 @@ class LocalParameterization(object):
           J_delta = f'(x) * Plus'(x) =  Jx * jacobian
     """
     return Jx.dot(self.jacobian)
+
+  def ToGlobalCovariance(self, x, sigma):
+    assert sigma.shape == (self.GlobalSize(),)*2
+    J = self.ComputeJacobian(x)
+    return J.T.dot(sigma).dot(J)
 
 class IdentityParameterization(LocalParameterization):
   def __init__(self, size):
@@ -110,6 +116,7 @@ def test_SubsetParameterization():
   assert( np.all( par.ComputeJacobian(None) == np.array([ [1],[0],[0] ]) ) )
   print "test_SubsetParameterization passed "
 
+#%% AutoDiffLocalParameterization
 class AutoDiffLocalParameterization(LocalParameterization):
   def __init__(self, plus_func, x0, delta0):
     super(AutoDiffLocalParameterization, self).__init__()
@@ -157,6 +164,7 @@ def test_AutoDiffLocalParameterization():
   assert( np.all( par.ComputeJacobian(x0) == np.eye(3)[:,:2] ) )
 
   print "test_AutoDiffLocalParameterization passed "
+#%% SE3Parameterization
 
 def skew(v):
     return np.array([[   0, -v[2],  v[1]],
@@ -230,6 +238,31 @@ def test_SE3Parameterization():
   assert_array_almost_equal( SE3Parameterization.Vec12(T1-T0), dT, 2)
 
   print "test_SE3Parameterization passed "
+
+def test_SE3Parameterization_solver():
+  Vec = SE3Parameterization.Vec12
+  Mat = SE3Parameterization.Mat44
+  def InvR(x, l):
+    return Vec( Mat(x) - Mat(l)  )
+  import geometry
+  T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(0.1*np.random.rand(6)))
+  l0 = Vec(T0)
+  x0 = Vec(np.eye(4))
+  problem = solver2.GaussHelmertProblem()
+  problem.AddConstraintWithArray(InvR, [x0], [l0])
+  problem.SetParameterization(x0, SE3Parameterization())
+  problem.SetParameterization(l0, SE3Parameterization())
+
+  try:
+    x,le,fac = solver2.SolveWithGESparse(problem,fac=True)
+  except solver2.CholmodNotPositiveDefiniteError:
+    return
+
+  print fac
+  assert_array_almost_equal(Mat(x), T0)
+  print "test_SE3Parameterization passed"
+
+#%% SphereParameterization
 
 def sinc_smooth(x):
   if np.abs(x) < 1e-6:
@@ -338,6 +371,8 @@ class SphereParameterization(LocalParameterization):
           y = [sinc(|v|/2) * v/2 , cos(|v|/2)]
     """
     norm_v_half = 0.5*np.linalg.norm(v)
+    if 2*norm_v_half > np.pi:
+      raise ValueError("SphereParameterization meant to be worked with vector length < np.pi ")
     y = np.hstack([ sinc_smooth(norm_v_half) * 0.5 * v, np.cos(norm_v_half) ])
     return y
 
@@ -348,23 +383,48 @@ class SphereParameterization(LocalParameterization):
     return  2 * norm_half * div_sin_norm_half * y[:-1]
 
 def test_SphereParameterization():
-  x     = np.r_[0,0,0,1.]
   param = SphereParameterization(4)
+  x     = param.ToHomoSphere( np.r_[0, 0, 0.1] )
 
   # plus 0
-  assert_array_equal(x, param.Plus(x, np.r_[0,0,0.]))
-  # always on sphere
-  for i in range(10):
-    assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
+  assert_array_almost_equal(x, param.Plus(x, np.r_[0,0,0.]))
 
-  # close approximate
-  x     = np.r_[1, 0.5, 0.2, 0]
-  delta = np.r_[0.001, 0.005, 0.002]
-  assert_array_almost_equal(x + param.ComputeJacobian(x).dot(delta),
-                            param.Plus(x, delta),
-                            4)
+  auto_jac = solver2.CheckJacobianFunction(param.Plus, None, x, 1e-7*np.ones(3))
+  for i in range(10):
+    # always on sphere
+    assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
+    # Jacobian
+    x_ = param.ToHomoSphere( 0.5*np.random.rand(3) )
+    assert_almost_equal( auto_jac(x_, np.zeros(3))[-1],
+                         param.ComputeJacobian(x_) )
 
   print "test_SphereParameterization passed "
+
+def test_SphereParameterization_solve():
+  pa = SphereParameterization(2)
+  def iden(x, y):
+    return NullSpaceForVector(y).dot( x )
+
+  x = pa.ToHomoSphere( 1.2 )
+
+  sigma = np.atleast_2d( 0.2**2 )
+  facs = np.empty(100)
+  xs   = np.empty(facs.shape+(2,))
+  for it in range(len(facs)):
+    y = [ pa.ToHomoSphere( 1.2 + 0.2*np.random.randn(1) ) for _ in range(200) ]
+    problem = solver2.GaussHelmertProblem()
+
+    for i in range(len(y)):
+      problem.AddConstraintWithArray(iden, [x], [y[i]])
+      problem.SetParameterization(y[i], pa )
+      problem.SetSigma(y[i], sigma)
+    problem.SetParameterization(x, pa )
+
+    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+
+  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
+  assert_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs]), 1.2, decimal=1)
+  print "test_SphereParameterization_solve passed "
 
 
 
@@ -438,21 +498,55 @@ def test_HomogeneousParameterization():
   assert_array_almost_equal( x,
                              param.Plus(x, np.zeros(3) ) )
 
-  delta = np.r_[0,0,5.]
-#  assert_array_equal( x0 + delta,
-#                     param.ToEuclidean( param.Plus(x, delta) ) )
-
-  # always on sphere
+  auto_jac = solver2.CheckJacobianFunction(param.Plus, None, x, 1e-7*np.ones(3))
   for i in range(10):
+    v = 100*np.random.rand(3)
+    # always on sphere
     assert_almost_equal(1,
-                        np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
+                        np.linalg.norm( param.Plus(x, v ) ) )
+    # forward backward
+    assert_almost_equal(v,
+                        param.ToEuclidean( param.ToHomoSphere(v) ) )
+    # Jacobian
+    x_ = param.ToHomoSphere( 100*np.random.rand(3) )
+    assert_almost_equal( auto_jac(x_, np.zeros(3))[-1],
+                         param.ComputeJacobian(x_) )
 
   print "test_HomogeneousParameterization passed "
 
+def test_HomogeneousParameterization_solve():
+  pa = HomogeneousParameterization(2)
+  def iden(x, y):
+    return NullSpaceForVector( pa.ToHomoSphere(y) ).dot( x )
+
+  x = pa.ToHomoSphere( 120 )
+
+  sigma = np.atleast_2d( 2.**2 )
+  facs = np.empty(100)
+  xs   = np.empty(facs.shape+(2,))
+  for it in range(len(facs)):
+    y = [ 120 + 2.*np.random.randn(1) for _ in range(200) ]
+    problem = solver2.GaussHelmertProblem()
+
+    for i in range(len(y)):
+      problem.AddConstraintWithArray(iden, [x], [y[i]])
+      problem.SetSigma(y[i], sigma)
+    problem.SetParameterization(x, pa )
+
+    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+
+  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
+  assert_approx_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs] ), 120.0, significant=3)
+  print "test_HomogeneousParameterization_solve passed "
 
 if __name__ == '__main__':
   test_SubsetParameterization()
   test_SE3Parameterization()
+  test_SE3Parameterization_solver()
+
   test_AutoDiffLocalParameterization()
   test_SphereParameterization()
   test_HomogeneousParameterization()
+  if 0:
+    test_SphereParameterization_solve()
+    test_HomogeneousParameterization_solve()

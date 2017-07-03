@@ -1701,6 +1701,8 @@ def CheckJacobianFunction(g, g_jac=None, *args):
   var_jacobian= pycppad.adfun(var_in, var_out).jacobian
   def g_jac_auto(*vec):
     J = var_jacobian( np.hstack(vec) )
+    check_nan(J)
+    check_allzero(J)
     return np.split(J, arg_indices, axis=1)
 
   if g_jac is None:
@@ -1765,62 +1767,6 @@ if __name__ == '__main__':
     x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
     print fac
     problem.ViewJacobianPattern()
-
-  def test_SE3Parameterization_solver():
-    Vec = SE3Parameterization.Vec12
-    Mat = SE3Parameterization.Mat44
-    def InvR(x, l):
-      return Vec( Mat(x) - Mat(l)  )
-    import geometry
-    T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(0.1*np.random.rand(6)))
-    l0 = Vec(T0)
-    x0 = Vec(np.eye(4))
-    problem = GaussHelmertProblem()
-    problem.AddConstraintWithArray(InvR, [x0], [l0])
-    problem.SetParameterization(x0, SE3Parameterization())
-    problem.SetParameterization(l0, SE3Parameterization())
-
-    try:
-      x,le,fac = SolveWithGESparse(problem,fac=True)
-    except CholmodNotPositiveDefiniteError:
-      return
-
-    print fac
-    assert_array_almost_equal(Mat(x), T0)
-    print "test_SE3Parameterization passed"
-
-  test_SE3Parameterization_solver()
-
-  def test_h():
-    pa = HomogeneousParameterization(2) #SphereParameterization(2)
-
-    def iden(x, y):
-      return NullSpaceForVector(x).dot(y)
-
-    x = pa.ToHomoSphere( 0.1 )
-    sigma = np.atleast_2d( 0.5**2 )
-    facs = np.empty(500)
-    xs   = np.empty(facs.shape+(2,))
-    for it in range(len(facs)):
-      y = [ pa.ToHomoSphere( 0.1 + 0.5*np.random.randn(1) ) for _ in range(100) ]
-      problem = GaussHelmertProblem()
-
-      for i in range(len(y)):
-        problem.AddConstraintWithArray(iden, [x], [y[i]])
-        problem.SetParameterization(y[i], HomogeneousParameterization(2) )#SphereParameterization(2) )
-        problem.SetSigma(y[i], sigma)
-      problem.SetParameterization(x, HomogeneousParameterization(2) )#SphereParameterization(2) )
-
-      xs[it],le,facs[it] = SolveWithGESparse(problem,fac=True)
-#    x,le,fac = SolveWithGESparse(problem,fac=True)
-
-    plt.hist(facs, 50)
-    print np.mean( [pa.ToEuclidean(x_, False) for x_ in  xs])
-    problem.UpdateXL(1,1)
-
-    print pa.ToEuclidean(x)
-    print pa.ToEuclidean(y[0])
-
 
 
 
