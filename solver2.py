@@ -937,6 +937,9 @@ class ObservationBlock(VariableBlock):
 def check_nan(x):
   assert np.all( np.isfinite(x) )
   return x
+def check_allzero(x):
+  assert not np.all( x == 0 )
+  return x
 
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
@@ -1178,7 +1181,7 @@ class GaussHelmertProblem(object):
       jac = list( g_jac( *xl_vec ) )
       jac.reverse() # reversed, to pop(-1) instead of pop(0)
       for dm in dms:
-        dm.Write( check_nan( jac.pop() ) )
+        dm.Write( check_allzero( jac.pop() ) )
 
     """ 5. Make new DenseMatrix that will hold the jacobians """
     dms = []
@@ -1304,8 +1307,11 @@ class GaussHelmertProblem(object):
     if ouput:
       return self.Jx, self.Jl
 
-  def UpdateX(self):
-    self.cv_x.OverWriteOrigin()
+  def UpdateXL(self, x=True, l=False ):
+    if x:
+      self.cv_x.OverWriteOrigin()
+    if l:
+      self.cv_l.OverWriteOrigin()
 
   def ViewJacobianPattern(self, withB=False, fig=None):
     if None in (self.Jx, self.Jl):
@@ -1388,7 +1394,7 @@ def test_ProblemBasic():
 
   # OverWriteOrigin
   xc[:] = 1
-  problem.UpdateX()
+  problem.UpdateXL()
   assert_array_equal(x, np.ones((num_x, dim_x)))
 
   # Create Jacobian
@@ -1760,7 +1766,7 @@ if __name__ == '__main__':
     print fac
     problem.ViewJacobianPattern()
 
-  def test_SE3Parameterization():
+  def test_SE3Parameterization_solver():
     Vec = SE3Parameterization.Vec12
     Mat = SE3Parameterization.Mat44
     def InvR(x, l):
@@ -1783,7 +1789,37 @@ if __name__ == '__main__':
     assert_array_almost_equal(Mat(x), T0)
     print "test_SE3Parameterization passed"
 
-  test_SE3Parameterization()
+  test_SE3Parameterization_solver()
+
+  def test_h():
+    pa = HomogeneousParameterization(2) #SphereParameterization(2)
+
+    def iden(x, y):
+      return NullSpaceForVector(x).dot(y)
+
+    x = pa.ToHomoSphere( 0.1 )
+    sigma = np.atleast_2d( 0.5**2 )
+    facs = np.empty(500)
+    xs   = np.empty(facs.shape+(2,))
+    for it in range(len(facs)):
+      y = [ pa.ToHomoSphere( 0.1 + 0.5*np.random.randn(1) ) for _ in range(100) ]
+      problem = GaussHelmertProblem()
+
+      for i in range(len(y)):
+        problem.AddConstraintWithArray(iden, [x], [y[i]])
+        problem.SetParameterization(y[i], HomogeneousParameterization(2) )#SphereParameterization(2) )
+        problem.SetSigma(y[i], sigma)
+      problem.SetParameterization(x, HomogeneousParameterization(2) )#SphereParameterization(2) )
+
+      xs[it],le,facs[it] = SolveWithGESparse(problem,fac=True)
+#    x,le,fac = SolveWithGESparse(problem,fac=True)
+
+    plt.hist(facs, 50)
+    print np.mean( [pa.ToEuclidean(x_, False) for x_ in  xs])
+    problem.UpdateXL(1,1)
+
+    print pa.ToEuclidean(x)
+    print pa.ToEuclidean(y[0])
 
 
 

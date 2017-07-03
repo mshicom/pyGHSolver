@@ -211,6 +211,7 @@ class Mappoint(object):
   def __init__(self, id=None, xyz_w=None):
     self.id = id
     self.xyz_w = xyz_w if not xyz_w is None else np.empty(3,'d')
+    self.homo_w = np.r_[self.xyz_w, 1.0]
 
   def __repr__(self):
     return "Mappoint(%s:%s)" % (self.id, self.xyz_w)
@@ -331,7 +332,7 @@ class OdometryFrame(object):
 K = np.array([[100, 0,   250],
               [0,   100, 250],
               [0,   0,     1]],'d')
-baseline = 0.5#None#
+baseline = None#0.5#
 slam = SLAMSystem(K, baseline)
 slam.Simulation(50,5)
 #slam.Draw()
@@ -407,6 +408,50 @@ if 0 and baseline is None:
   x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
   print 'variance factor:%f' % fac
 
+#%% ProjectErrorHomo
+
+def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
+  check_magnitude(kf_r_cw)
+
+  ray_obs = K_inv.dot( np.hstack( [kf_u, kf_v, 1.0] ) )
+#  ray_obs /= np.linalg.norm(ray_obs)
+
+  ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
+#  ray_est /= np.linalg.norm(ray_est)
+  return NullSpaceForVector(ray_obs).dot(ray_est)
+
+if 1 and baseline is None:
+  fig = plt.figure(figsize=(11,11), num='ba')
+  ax = fig.add_subplot(111, projection='3d')
+  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
+  ax.scatter(Pw[0],Pw[1],Pw[2])
+  ax.set_xlim3d(-3,3)
+  ax.set_ylim3d(-3,3)
+  ax.set_zlim3d(-3,3)
+  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+  DrawCamera(cam, color='b')
+
+  problem = GaussHelmertProblem()
+  for kf, mp in product(slam.KFs, slam.MPs):
+    if kf.id is None:
+      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+
+    if mp.id is None:
+      mp.id, _ = problem.AddParameter([mp.homo_w])
+      problem.SetParameterizationWithID(mp.id[0], HomogeneousParameterization(4))
+    u,v = kf.Project(mp.xyz_w)
+    u += np.random.randn(1)
+    v += np.random.randn(1)
+    uv_id, _ = problem.AddObservation([u,v])
+
+    problem.AddConstraintWithID(ProjectErrorHomo, kf.id + mp.id, uv_id)
+  problem.SetVarFixed(kf.r_cw)
+  problem.SetVarFixed(kf.t_cw)
+  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+
+  problem.cv_x.OverWriteOrigin()
+  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+  DrawCamera(cam, color='r')
 
 #%% StereoProjectError
 
@@ -557,7 +602,7 @@ if 0 and baseline is None:
 #  print Mat(slam.offset.vT_ab)
 
 #%% orbslam
-if 1:
+if 0:
 
   if not 'tracker' in vars() or 0:
     import sys
@@ -566,12 +611,12 @@ if 1:
     import orbslam
     import cv2
 
-#    base_dir = "/home/nubot/data/workspace/ORB_SLAM2/"
-#    pic_l_path = "/home/nubot/data/Kitti/image_0/%06d.png"
-#    pic_r_path = "/home/nubot/data/Kitti/image_1/%06d.png"
-    base_dir = "/home/kaihong/workspace/ORB_SLAM2/"
-    pic_l_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_0/%06d.png"
-    pic_r_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_1/%06d.png"
+    base_dir = "/home/nubot/data/workspace/ORB_SLAM2/"
+    pic_l_path = "/home/nubot/data/Kitti/image_0/%06d.png"
+    pic_r_path = "/home/nubot/data/Kitti/image_1/%06d.png"
+#    base_dir = "/home/kaihong/workspace/ORB_SLAM2/"
+#    pic_l_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_0/%06d.png"
+#    pic_r_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_1/%06d.png"
     plt.imread(pic_l_path % 0)
 
     tracker = orbslam.System( base_dir + "Vocabulary/ORBvoc.bin",
@@ -612,8 +657,8 @@ if 1:
 
       pc_xyz = ax2Rot(r_cw).dot(pw_xyz) + t_cw
       invZ = 1.0/pc_xyz[2]
-      if invZ > 0:
-        print "neg inv"
+#      if invZ > 0:
+#        print "neg inv"
 
       xl = pc_xyz[0]*invZ*fx + cx
       yl = pc_xyz[1]*invZ*fy + cy

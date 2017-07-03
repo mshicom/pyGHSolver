@@ -74,6 +74,7 @@ class IdentityParameterization(LocalParameterization):
 
 class SubsetParameterization(LocalParameterization):
   def __init__(self, active_parameters_mask):
+    super(SubsetParameterization, self).__init__()
     self.active_mask = np.array(active_parameters_mask, bool)
     self.active_indice, = np.where(self.active_mask)
 
@@ -111,6 +112,8 @@ def test_SubsetParameterization():
 
 class AutoDiffLocalParameterization(LocalParameterization):
   def __init__(self, plus_func, x0, delta0):
+    super(AutoDiffLocalParameterization, self).__init__()
+
     self.plus_func = plus_func
     self.global_size = len(x0)
     self.local_size  = len(delta0)
@@ -121,7 +124,7 @@ class AutoDiffLocalParameterization(LocalParameterization):
     jac_func = pycppad.adfun(in_var, out_var).jacobian
 
     def jac_delta(x):
-      inp = np.hstack( [x0, np.zeros(self.local_size) ])
+      inp = np.hstack( [x, np.zeros(self.local_size) ])
       J = jac_func(inp)
       return J[:, self.global_size:]
     self.jac_delta = jac_delta
@@ -180,7 +183,7 @@ class SE3Parameterization(LocalParameterization):
   J[9:12, 0:3] = np.eye(3)
 
   def __init__(self):
-    self.jacobian = None
+    super(SE3Parameterization, self).__init__()
 
   def GlobalSize(self):
     """ Size of x """
@@ -225,9 +228,231 @@ def test_SE3Parameterization():
 
   dT = p.ComputeJacobian(x0).dot(dx)
   assert_array_almost_equal( SE3Parameterization.Vec12(T1-T0), dT, 2)
+
   print "test_SE3Parameterization passed "
+
+def sinc_smooth(x):
+  if np.abs(x) < 1e-6:
+    xx = x**2
+    return 1.0 + xx * (xx/120.0 - 1.0/6.0) # 1 - (x^2)/6 + (x^4)/120 + O(x^6)
+  else:
+    return np.sin(x)/x
+
+
+def ComputeHouseholderVector(x):
+  """ Algorithm 5.1.1 from 'Matrix Computations' by Golub et al. (Johns Hopkins
+      Studies in Mathematical Sciences) but using the nth element of the input
+      vector as pivot instead of first. This computes the vector v with v(n) = 1
+      and beta such that H = I - beta * v * v^T is orthogonal and
+      H * x = ||x||_2 * e_n.
+  """
+  sigma = np.sum(x[:-1]**2)
+  v     = x.copy()
+  v[-1] = 1.0
+  beta  = 0.0
+  x_pivot = x[-1]
+  if (sigma <= 1e-12):
+    if x_pivot < 0.:
+      beta = 2.0
+    return v, beta
+
+  mu = np.sqrt( x_pivot**2 + sigma )
+  v_pivot = 1.0
+  if x_pivot <= 0.:
+    v_pivot = x_pivot - mu
+  else:
+    v_pivot = -sigma / (x_pivot + mu)
+
+  beta = 2.0 * v_pivot**2 / (sigma + v_pivot**2)
+  v[:-1] /= v_pivot
+  return v, beta
+
+def HouseholderMatrix(x):
+  """a Householder matrix H(x) of vector x can transform x to lie
+     along the coordinate axis, i.e, H(x) * x = (0, . . . , 0, 1),
+     which can be seen as on sphere if ||x||=1
+  """
+  v, beta = ComputeHouseholderVector(x)
+  H = np.eye(len(v)) - v.reshape(-1,1) * ( beta * v )
+  return H
+
+def NullSpaceForVector(x):
+  if 1:
+    return HouseholderMatrix(x)[:-1, :]
+  else:
+    Q,R = np.linalg.qr(x.reshape(-1,1), 'complete')
+    return Q[:, 1:].T
+
+class SphereParameterization(LocalParameterization):
+  """ This provides a parameterization for homogeneous vectors which are commonly
+   used in Structure for Motion problems.  One example where they are used is
+   in representing points whose triangulation is ill-conditioned. Here
+   it is advantageous to use an over-parameterization since homogeneous vectors
+   can represent points at infinity.
+
+   The plus operator is defined as
+   Plus(x, delta) =
+      [sin(0.5 * |delta|) * delta / |delta|, cos(0.5 * |delta|)] * x
+   with * defined as an operator which applies the update orthogonal to x to
+   remain on the sphere. We assume that the last element of x is the scalar
+   component. The size of the homogeneous vector is required to be greater than
+   1.
+  """
+  def __init__(self, dim):
+    super(SphereParameterization, self).__init__()
+    self.dim = dim
+    self.jacobian = np.empty((self.dim, self.dim-1))
+
+  def GlobalSize(self):
+    return self.dim
+
+  def LocalSize(self):
+    return self.dim-1
+
+  def Plus(self, x, delta):
+    y = self.ToHomoSphere(delta)
+
+    v, beta = ComputeHouseholderVector(x)
+    x_plus_delta = np.linalg.norm(x) * (y -  v * ( beta * v.dot(y) ) )
+    return x_plus_delta
+
+  @staticmethod
+  def Minus(x, y):
+    return NullSpaceForVector(x).dot(y)
+
+  def ComputeJacobian(self, x):
+    """ The Jacobian is equal to J = 0.5 * H.leftCols(size_ - 1) where H is the
+        Householder matrix (H = I - beta * v * v').
+    """
+    J = self.jacobian
+    v, beta = ComputeHouseholderVector(x)
+    for i in range(self.dim-1):
+      J[:,i]  = -0.5 * beta * v[i] * v
+      J[i,i] += 0.5
+    J *= np.linalg.norm(x)
+    return J
+
+  @staticmethod
+  def ToHomoSphere(v):
+    """ extend v to homogeneous vector y and spherecal normalize it, i.e, |y|=1
+          y = [sinc(|v|/2) * v/2 , cos(|v|/2)]
+    """
+    norm_v_half = 0.5*np.linalg.norm(v)
+    y = np.hstack([ sinc_smooth(norm_v_half) * 0.5 * v, np.cos(norm_v_half) ])
+    return y
+
+  @staticmethod
+  def ToEuclidean(y, half=True):
+    norm_half = np.arccos(y[-1])
+    div_sin_norm_half  = 1.0/np.sqrt(1 - y[-1]**2)
+    return  2 * norm_half * div_sin_norm_half * y[:-1]
+
+def test_SphereParameterization():
+  x     = np.r_[0,0,0,1.]
+  param = SphereParameterization(4)
+
+  # plus 0
+  assert_array_equal(x, param.Plus(x, np.r_[0,0,0.]))
+  # always on sphere
+  for i in range(10):
+    assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
+
+  # close approximate
+  x     = np.r_[1, 0.5, 0.2, 0]
+  delta = np.r_[0.001, 0.005, 0.002]
+  assert_array_almost_equal(x + param.ComputeJacobian(x).dot(delta),
+                            param.Plus(x, delta),
+                            4)
+
+  print "test_SphereParameterization passed "
+
+
+
+class HomogeneousParameterization(LocalParameterization):
+  """ This provides a parameterization for homogeneous vectors which are commonly
+   used in Structure for Motion problems.  One example where they are used is
+   in representing points whose triangulation is ill-conditioned. Here
+   it is advantageous to use an over-parameterization since homogeneous vectors
+   can represent points at infinity.
+
+   The plus operator is defined as
+   Plus(x, delta) =
+      [...]
+   with * defined as an operator which applies the update orthogonal to x to
+   remain on the sphere. We assume that the last element of x is the scalar
+   component. The size of the homogeneous vector is required to be greater than
+   1.
+  """
+  def __init__(self, dim):
+    super(HomogeneousParameterization, self).__init__()
+    self.dim = dim
+    self.jacobian = np.empty((self.dim, self.dim-1))
+
+  def GlobalSize(self):
+    return self.dim
+
+  def LocalSize(self):
+    return self.dim-1
+
+  def Plus(self, x, delta):
+    y = self.ToHomoSphere(delta)
+    v, beta = ComputeHouseholderVector(x)
+    y_rotated = y -  v * ( beta * v.dot(y) )
+    x_plus_delta = y_rotated/np.linalg.norm(y_rotated)
+    return x_plus_delta
+
+
+  def ComputeJacobian(self, x):
+    J = self.jacobian
+    v, beta = ComputeHouseholderVector(x)
+    for i in range(self.dim-1):
+      J[:,i]  = -beta * v[i] * v
+      J[i,i] += 1
+    J /= np.linalg.norm(x)
+    return J
+
+  @staticmethod
+  def ToHomoSphere(v, positive=True):
+    """ extend v to homogeneous vector y and spherecal normalize it, i.e, |y|=1
+          y = normalized( [v, 1] )
+        Notice it only cover the half sphere since the last element is always positive.
+    """
+    y = np.hstack([v, 1.0]) if positive else np.hstack([v, -1.0])
+    y /= np.linalg.norm(y)
+    return y
+
+  @staticmethod
+  def ToEuclidean(y):
+    return y[:-1]/y[-1]
+
+  @staticmethod
+  def Minus(x, y):
+    return NullSpaceForVector(x).dot(y)
+
+def test_HomogeneousParameterization():
+  x0 = np.r_[0, 0, 1.]
+  x  = HomogeneousParameterization.ToHomoSphere(x0)
+  param = HomogeneousParameterization( len(x) )
+
+  # plus 0
+  assert_array_almost_equal( x,
+                             param.Plus(x, np.zeros(3) ) )
+
+  delta = np.r_[0,0,5.]
+#  assert_array_equal( x0 + delta,
+#                     param.ToEuclidean( param.Plus(x, delta) ) )
+
+  # always on sphere
+  for i in range(10):
+    assert_almost_equal(1,
+                        np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
+
+  print "test_HomogeneousParameterization passed "
+
 
 if __name__ == '__main__':
   test_SubsetParameterization()
   test_SE3Parameterization()
   test_AutoDiffLocalParameterization()
+  test_SphereParameterization()
+  test_HomogeneousParameterization()
