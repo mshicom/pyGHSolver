@@ -360,8 +360,8 @@ def test_MatrixTreeNode():
   sb = SparseBlock()
   id1 = sb.NewDenseMatrix(0,0,(2,2))
   id2 = sb.NewDiagonalMatrix(2,2,4)
-  sb.PutDenseMatrix(id1, np.full((2,2), -1))
-  sb.PutDenseMatrix(id2, np.full(4, 2))
+  sb.PutDenseMatrix(id1, np.full((2,2), -1.0))
+  sb.PutDenseMatrix(id2, np.full(4, 2.0))
 
   sbm = sb.BuildSparseMatrix()
   assert_array_equal(sbm.A,
@@ -909,7 +909,7 @@ def test_CompoundVector():
     src_offset, src_array = cvm.AddMaping(4, dst_array, None if i==0 else op_double)
   cvm.flat[:] = 1
   cvm.Flush()
-  assert_array_equal(cv.flat, np.r_[np.ones(4), np.full(12, 2)])
+  assert_array_equal(cv.flat, np.r_[np.ones(4), np.full(12, 2.0)])
 
   print "test_CompoundVector passed"
 
