@@ -943,6 +943,11 @@ def check_allzero(x):
     raise ValueError("all zero")
   return x
 
+def check_magnitude(r):
+  if np.linalg.norm(r) > np.pi:
+    raise ValueError("rotation magnitude larger than pi, will cause problems during optimizatoin")
+  return r
+
 class GaussHelmertProblem(object):
   ConstraintBlock = namedtuple('ConstraintBlock', ['offset', 'g_res', 'g_jac'])
 
@@ -1006,7 +1011,7 @@ class GaussHelmertProblem(object):
 
   def SetSigmaWithID(self, array_id, sigma):
     try:
-      self.dict_observation_block[array_id].sigma = sigma
+      self.dict_observation_block[array_id].sigma = np.atleast_2d(sigma)
     except KeyError:
       raise ValueError("array not found")
 
@@ -1507,7 +1512,7 @@ def test_FixAndParameterization():
 
 from cvxopt import matrix,spmatrix
 from cvxopt import solvers
-def SolveWithCVX(problem, fac=False, cov=False):
+def SolveWithCVX(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   problem.SetUp()
   res  = problem.CompoundResidual()
   lc   = problem.CompoundObservation()
@@ -1518,7 +1523,7 @@ def SolveWithCVX(problem, fac=False, cov=False):
   A,B = problem.MakeJacobians(coo=True)
   Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=True)
   b   = matrix(np.zeros((problem.dim_dx, 1), 'd'))
-  for it in range(10):
+  for it in range(maxit):
     problem.UpdateJacobian()
     problem.UpdateResidual()
 
@@ -1537,12 +1542,13 @@ def SolveWithCVX(problem, fac=False, cov=False):
     except:
       print "Singular problem"
       break
-    if np.abs(dx).max() < 1e-6:
+    if np.abs(dx).max() < dx_thres:
       break
 
   ret = [xc, le]
   if fac:
     factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
     Wgg   = np.linalg.inv(BSBT.A)
@@ -1581,6 +1587,7 @@ def SolveWithGEDense(problem, fac=False, cov=False):
   ret = [xc, le]
   if fac:
     factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
     covariance = np.linalg.inv(ATWA)
@@ -1693,7 +1700,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 #
 #  return ret
 #%%
-def CheckJacobianFunction(g, g_jac=None, *args):
+def MakeJacobianFunction(g, *args):
   arg_sizes= [ len(vec) for vec in args ]
 
   arg_indices= np.cumsum( arg_sizes )[:-1]
@@ -1706,31 +1713,37 @@ def CheckJacobianFunction(g, g_jac=None, *args):
     check_nan(J)
     check_allzero(J)
     return np.split(J, arg_indices, axis=1)
+  return g_jac_auto
 
-  if g_jac is None:
-    return g_jac_auto
+def AddJacobian(f):
+  """
+  Examples
+  --------
+  >>>  @AddJacobian
+  >>>  def foo(x,y):
+  >>>    return x-y
+  >>>  res, jac = foo(np.ones(3), np.zeros(3))
+  """
+  def g(*args):
+    if not hasattr(f, 'jac'):
+      f.jac = MakeJacobianFunction(f, *args)
+    return f(*args), f.jac(*args)
+  return g
 
-  tmp_jac      = list( g_jac( *args ) )
+def CheckJacobianFunction(g, g_jac=None, *args):
+  g_jac_auto   = MakeJacobianFunction(g, *args)
   tmp_jac_auto = g_jac_auto( *args )
 
+  if g_jac is None:
+    return tmp_jac_auto
+
+  tmp_jac      = list( g_jac( *args ) )
   assert len(tmp_jac)==len(tmp_jac_auto)
   for a,b in zip(tmp_jac, tmp_jac_auto):
     assert_array_almost_equal(a,b)
   return
 
-  def test():
-    def AB(vT_a, vT_b):
-      return Vec( Mat(vT_a).dot( Mat(vT_b) )  )
-    def ABJac(vT_a, vT_b):
-      Ma = SE3Parameterization.Mat44(vT_a)
-      Mb = SE3Parameterization.Mat44(vT_b)
-      Ja = np.kron( Mb.T, np.eye(3) )
-      Jb = np.kron( np.eye(4), Ma[:3,:3] )
-      return Ja,Jb
-    import geometry
-    vT_a = Vec( geometry.SE3.sample_uniform() )
-    vT_b = Vec( geometry.SE3.sample_uniform() )
-    CheckJacobianFunction(AB, ABJac, vT_a, vT_b)
+
 
 #%%
 if __name__ == '__main__':

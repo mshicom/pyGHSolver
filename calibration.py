@@ -123,23 +123,20 @@ eta[:] = eta_true[:]
 problem = GaussHelmertProblem()
 for i in range(T):
   for s in range(1, S):
-    problem.AddConstraintUsingAD(CalibrationConstraint,
+    problem.AddConstraintWithArray(CalibrationConstraint,
                                  [ xi[s-1], eta[s-1] ],
                                  [ rs[0][i], ts[0][i], rs[s][i], ts[s][i] ])
-#    problem.SetSigma()
+    problem.SetSigma(rs[s][i], np.diag(Sigmas[s][0]**2))
+    problem.SetSigma(ts[s][i], np.diag(Sigmas[s][1]**2))
+for i in range(T):
+  problem.SetSigma(rs[0][i], np.diag(Sigmas[s][0]**2))
+  problem.SetSigma(ts[0][i], np.diag(Sigmas[s][1]**2))
+
 #    problem.SetParameterization(xi[0], SubsetParameterization([1,1,0]))
 #      problem.SetParameterization(rs[0][i], SubsetParameterization([1,1,0]))
 #SetVarFixed
-x_est, e  = SolveWithCVX(problem)
+#x_est, e  = SolveWithCVX(problem)
+x_est, e, fac = SolveWithGESparse(problem, fac=True)
+
 print x_est.reshape(-1,6)
-#  dim_x = problem.NumParameters()
-#  dim_l = problem.NumObservations()
-#  dim_r = problem.NumResiduals()
-#  slc_x = slice(0, dim_x)
-#  slc_l = slice(dim_x, dim_x+dim_l)
-#  slc_r = slice(dim_x+dim_l, dim_x + dim_l + dim_r)
-#
-#  x0 = problem.CollectParameters()
-#  l0 = problem.CollectObservations()
-#  x,l = x0.copy(),l0.copy()
-#  e = l - l0
+

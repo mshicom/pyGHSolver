@@ -383,7 +383,7 @@ class SphereParameterization(LocalParameterization):
     return y
 
   @staticmethod
-  def ToEuclidean(y, half=True):
+  def ToEuclidean(y):
     norm_half = np.arccos(y[-1])
     div_sin_norm_half  = 1.0/np.sqrt(1 - y[-1]**2)
     return  2 * norm_half * div_sin_norm_half * y[:-1]
@@ -395,7 +395,7 @@ def test_SphereParameterization():
   # plus 0
   assert_array_almost_equal(x, param.Plus(x, np.r_[0,0,0.]))
 
-  auto_jac = solver2.CheckJacobianFunction(param.Plus, None, x, 1e-7*np.ones(3))
+  auto_jac = solver2.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     # always on sphere
     assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
@@ -509,7 +509,7 @@ def test_HomogeneousParameterization():
   assert_array_almost_equal( x,
                              param.Plus(x, np.zeros(3) ) )
 
-  auto_jac = solver2.CheckJacobianFunction(param.Plus, None, x, 1e-7*np.ones(3))
+  auto_jac = solver2.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     v = 100*np.random.rand(3)
     # always on sphere
