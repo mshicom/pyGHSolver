@@ -938,6 +938,7 @@ def check_nan(x):
   if not np.all( np.isfinite(x) ):
     raise ValueError("invalid value")
   return x
+
 def check_allzero(x):
   if np.all( x == 0 ):
     raise ValueError("all zero")
@@ -1646,6 +1647,83 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     ret.append( covariance )
   return ret
 
+def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
+  problem.SetUp()
+  res  = problem.CompoundResidual()
+  lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+  le   = np.zeros(problem.dim_dl)
+
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=False)
+  A,B = problem.MakeJacobians(coo=False)
+  Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=False)
+  problem.UpdateJacobian()
+  problem.UpdateResidual()
+
+  Sgg_factor  = cholesky(BSBT)
+  Sxx_factor  = None
+
+  tau = 1e-2
+  nu = 2.
+
+  x_old = xc.copy()
+  l_old = lc.copy()
+  r_old = res.copy()
+
+  for it in range(maxit):
+
+    print np.linalg.norm(res),np.linalg.norm(le)
+    Cg  = B * le - res
+
+    # solve
+    Sgg_factor.cholesky_inplace(BSBT)
+    F = Sgg_factor.solve_A(A)   # W * A = F -->> A = BSBT * F
+                                # ATW = (BSBT * F).T / BSBT = F.T
+    ATWA= (A.T * F).T           # to maintain in csc
+    if Sxx_factor is None:
+      mu = tau * ATWA.diagonal().max()
+      Sxx_factor = cholesky(ATWA, beta=mu)
+    else:
+      Sxx_factor.cholesky_inplace(ATWA, beta=mu)
+    dx  = Sxx_factor.solve_A( Cg * F )  #np.linalg.solve(ATWA,  ATW.dot(Cg))
+    lag = Sgg_factor.solve_A( A * dx - Cg ) # BSBT*lambda = A*dx - Cg
+    dl  = -Sigma * (lag * B) - le  # B.T * lag
+    problem.Plus(dx, dl)
+
+    problem.UpdateResidual()
+    pre = A * dx + B * dl
+    rho = (np.linalg.norm(r_old) - np.linalg.norm(res))/np.linalg.norm(pre)
+
+    if rho > 0:
+      l_old[:] = lc
+      x_old[:] = xc
+      r_old[:] = res
+      le  += dl
+      problem.UpdateJacobian()
+
+      mu = mu * np.max([1.0/3, 1.0 - (2*rho - 1)**3])
+      nu = 2.0
+
+      if np.abs(dx).max() < dx_thres:
+        break
+    else:
+      lc[:] = l_old
+      xc[:] = x_old
+      res[:] = r_old
+
+      mu = mu * nu
+      nu = 2*nu
+      print mu
+
+  ret = [xc, le]
+  if fac:
+    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+    print 'variance factor:%f' % factor
+    ret.append(factor)
+  if cov:
+    covariance = Sxx_factor.inv()
+    ret.append( covariance )
+  return ret
 #from pykrylov.symmlq import Symmlq
 #from symmlq import symmlq
 #from cvxopt import blas
@@ -1779,7 +1857,7 @@ if __name__ == '__main__':
 
 #    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
 #    problem.SetSigma(bs[0], sigma**2*np.eye(2))
-    x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
+    x,le,fac,cov = SolveWithGESparseLM(problem, fac=True, cov=True)
     print fac
     problem.ViewJacobianPattern()
 
