@@ -1779,7 +1779,7 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 #  return ret
 #%%
 def MakeJacobianFunction(g, *args):
-  arg_sizes= [ len(vec) for vec in args ]
+  arg_sizes= [ len(np.atleast_1d(vec)) for vec in args ]
 
   arg_indices= np.cumsum( arg_sizes )[:-1]
   var       = np.hstack( args )
@@ -1821,7 +1821,51 @@ def CheckJacobianFunction(g, g_jac=None, *args):
     assert_array_almost_equal(a,b)
   return
 
+def ErrorPropogationExplicit(cov_x, func, x):
+  """ y + dy = func(x + dx)
+      dy = J dx, J = df/dx,
+      cov_y = J cov_x J'
+  """
+  J = MakeJacobianFunction(func, x)(x)[0]
+  return J.dot(cov_x).dot(J.T)
+  def test():
+    f = np.sin
+    x = np.r_[0.2]
+    var = np.r_[0.1]
+    var_est = ErrorPropogationExplicit(var, f, x)
+    var_exp = np.cos(x)**2 * var
+    assert_almost_equal(var_est, var_exp)
 
+def NullMatrix(A):
+  A = np.atleast_2d(A)
+  Q,R = np.linalg.qr(A.T, 'complete')
+  rank = A.shape[0]
+  return Q[:, rank:]
+
+def ErrorPropogationImplicit(cov_x, constaint_func, x, y=None):
+  """ G(x)=0
+      dG = J dx = 0
+      dy = J NullSpace(J)*dx
+  """
+  J = MakeJacobianFunction(func, x)(x)[0]
+  Jn = NullMatrix(J)
+  return Jn.dot(cov_x).dot(Jn.T)
+
+def Montacalo(f, x0, sigma, trial=10000):
+  dim_x, dim_y = len(np.atleast_1d(x)), len(np.atleast_1d(f(x0)))
+
+  y = np.empty((trial, dim_y))
+  for i in xrange(trial):
+    y[i] = f( x0 + sigma*np.random.randn(dim_x) )
+  y_mean = np.mean(y, axis=0)
+  y_cov = np.cov((y - y_mean).T)
+  return y_cov, y_mean
+
+#cov_r1_r2 = 0.1**2 * np.eye(6)
+#f = lambda x: axAdd(-x[:3],x[3:])
+#x0 = np.r_[0.1,0,0, 0.2,0.3,0.1]
+#cov_est = ErrorPropogationExplicit(cov_r1_r2, f, x0)
+#cov_mon = Montacalo(f, x0, 0.1)
 
 #%%
 if __name__ == '__main__':
