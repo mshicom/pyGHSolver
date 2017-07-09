@@ -8,40 +8,7 @@ Created on Wed Jun  7 14:34:54 2017
 import numpy as np
 import matplotlib.pyplot as plt
 from solver2 import *
-
-inv = np.linalg.inv
-def skew(v):
-    return np.array([[   0, -v[2],  v[1]],
-                     [ v[2],    0, -v[0]],
-                     [-v[1], v[0],    0 ]])
-def vee(s):
-    return np.array([s[2,1], s[0,2], s[1,0]])
-
-def invT(T):
-    R, t = T[:3, :3], T[:3, 3]
-    Ti = np.eye(4, dtype='d')
-    Ti[:3, :3] = R.T
-    Ti[:3, 3]  = -R.T.dot(t)
-    return Ti
-
-def ax2Rot(r):
-    p = np.linalg.norm(r)
-    if np.abs(p) < 1e-12:
-        return np.eye(3)
-    else:
-        S = skew(r/p)
-        return np.eye(3) + np.sin(p)*S + (1.0-np.cos(p))*S.dot(S)
-
-def Rot2ax(R):
-    tr = np.trace(R)
-    a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
-    an = np.linalg.norm(a)
-    phi= np.arctan2(an, tr-1)
-    if np.abs(phi) < 1e-12:
-        return np.zeros(3,'d')
-    else:
-        return phi/an*a
-
+from sfm import invT, ax2Rot, Rot2ax, axAdd, MfromRT
 def rotateX(roll):
     """rotate around x axis"""
     return np.array([[1, 0, 0, 0],
@@ -69,74 +36,190 @@ def translate(x,y,z):
                      [0, 0, 0, 1]],'d')
 d2r =  lambda deg: np.pi*deg/180
 
-#def test():
-Hm = [ rotateZ(d2r(10)).dot(translate(1,0,0)),
-       rotateX(d2r(30)).dot(translate(2,0,0))]
-Hm_inv = [invT(h) for h in Hm]
+tFromT = lambda T: T[:3,3].copy()
+rFromT = lambda T: Rot2ax(T[:3,:3])
 
-xi_true, eta_true = [],[]
-for h in Hm:
-  xi_true.append( h[:3,3].copy() )
-  eta_true.append( Rot2ax(h[:3,:3]) )
+def deep_map(function, list_of_list):
+  """ ret = [ map(func, list) for list in list_of_list ]
+  Example
+  -------
+  >>> deep_map(lambda a:a, [[[1,0],[2,3]]])
+  """
+  if not isinstance(list_of_list[0], list):
+    return map(function, list_of_list)
+  return [ deep_map(function, l) for l in list_of_list ]
 
-S = len(Hm) + 1
+''' generate ground truth relative pos between sensors '''
+# s <- a , other <- base
+T_sa_group = [ rotateZ(d2r(10)).dot(translate(1,0,0)),
+              rotateX(d2r(30)).dot(translate(2,0,0))]
+T_as_group = map(invT, T_sa_group)
+num_sensor = len(T_sa_group) + 1
 
-def CalibrationConstraint(xi, eta, r0, t0, r1, t1):
-  R10 = ax2Rot(eta)
-  R1  = ax2Rot(r1)
-  e_t = xi - R1.dot(xi) + R10.dot(t0) - t1
-  e_r = R10.dot(r0) - r1
+t_sa_group = map(tFromT, T_sa_group)
+r_sa_group = map(rFromT, T_sa_group)
+
+''' generate ground truth relative motion '''
+#  np.random.seed(2)
+num_pos = 10
+dT_group_list = [] # T: t <- t+1
+for _ in xrange(num_pos):
+  # base
+  dT_a = rotateX(d2r(10+20*np.random.rand(1))).dot(
+         rotateY(d2r(10+20*np.random.rand(1))).dot(
+         rotateZ(d2r(10+20*np.random.rand(1))).dot(
+         translate(1,1,1))))
+  # others
+  dT_other = [T_sa.dot(dT_a).dot(T_as) for T_sa,T_as in zip(T_sa_group, T_as_group)]
+
+  dT_group_list.append([dT_a] + dT_other )
+
+dr_group_list = deep_map(rFromT, dT_group_list)
+dt_group_list = deep_map(tFromT, dT_group_list)
+
+
+''' generate ground truth absolute pose, world <- sensor'''
+T_ws_group0 = [ np.eye(4) ]+T_as_group
+T_ws_group_list = [ T_ws_group0 ]  #  M[t+1][s] = M[t][s] * dT[t][s], s = 0...S
+for dT_group in dT_group_list:
+  T_last_group = T_ws_group_list[-1]
+  T_ws_group_list.append( [ T_s.dot(dT_s) for T_s, dT_s in zip(T_last_group, dT_group) ]  )
+
+r_ws_group_list = deep_map(rFromT, T_ws_group_list)
+t_ws_group_list = deep_map(tFromT, T_ws_group_list)
+
+''' generate noisy absolute pose measurement, world <- sensor'''
+sigma_r_abs  = 0.002
+sigma_t_abs  = 0.02
+Cov_r_abs = sigma_r_abs**2 * np.eye(3)
+Cov_t_abs = sigma_t_abs**2 * np.eye(3)
+
+def add_noise(sigma):
+  return lambda x: x+sigma*np.random.randn(3)
+r_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_r_abs), r_ws_group_list)
+t_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_t_abs), t_ws_group_list)
+T_ws_group_list_noisy = [[MfromRT(r,t) for r,t in zip(r_group,t_group)]
+                            for r_group,t_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy)]
+
+''' generate (noisy) relative pose measurement from noisy absolute pose, t <- t+1'''
+dT_group_list_noisy = []
+for i in xrange(1, num_pos):
+  dT_group = [ invT(T_last).dot(T) for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]) ]
+  dT_group_list_noisy.append(dT_group)
+dr_group_list_noisy = deep_map(rFromT, dT_group_list_noisy)
+dt_group_list_noisy = deep_map(tFromT, dT_group_list_noisy)
+
+''' covariance for relative pose measurement '''
+if 0:
+  cov_dr_group_list = []
+  cov_dt_group_list = []
+  for i in xrange(1, num_pos):
+    cov_r_group,cov_t_group = [],[]
+    for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]):
+      R1 = T_last[:3, :3]
+      t1,t2 = T_last[:3, 3], T[:3, 3]
+      t12 = R1.T.dot(t2-t1)
+      cov_r_12 = Cov_r_abs + R1.T.dot(Cov_r_abs).dot(R1)
+      Jr = skew(-t12)
+      cov_t_12 = Jr.dot(Cov_r_abs).dot(Jr.T) + R1.T.dot(2 * Cov_t_abs).dot(R1)         # t12 = R(t2-t1)
+      cov_r_group.append(cov_r_12)
+      cov_t_group.append(cov_t_12)
+    cov_dr_group_list.append(cov_r_group)
+    cov_dt_group_list.append(cov_t_group)
+else:
+  @AddJacobian
+  def RelT(r1,t1,r2,t2):
+    r12 = axAdd(-r1,r2)
+    t12 = ax2Rot(-r1).dot(t2-t1)
+    return np.hstack([r12, t12])
+  Cov_abs = scipy.linalg.block_diag(Cov_r_abs,Cov_t_abs,Cov_r_abs,Cov_t_abs)
+
+  dr_group_list_noisy,dt_group_list_noisy = [],[]
+  cov_dr_group_list,cov_dt_group_list = [],[]
+  for i in xrange(1, num_pos):
+    dr_group, dt_group,cov_dr_group,cov_dt_group = [], [],[],[]
+    for r_last,t_last,r,t in zip(r_ws_group_list_noisy[i-1], t_ws_group_list_noisy[i-1],r_ws_group_list_noisy[i], t_ws_group_list_noisy[i]):
+      drt,Js = RelT(r_last,t_last,r,t)
+      Js = np.hstack(Js)
+      cov_dr = Js[:3].dot(Cov_abs).dot(Js[:3].T)
+      cov_dt = Js[3:].dot(Cov_abs).dot(Js[3:].T)
+
+      dr_group.append(drt[:3])
+      dt_group.append(drt[3:])
+      cov_dr_group.append(cov_dr)
+      cov_dt_group.append(cov_dt)
+    dr_group_list_noisy.append(dr_group)
+    dt_group_list_noisy.append(dt_group)
+    cov_dr_group_list.append(cov_dr_group)
+    cov_dt_group_list.append(cov_dt_group)
+
+#%% AbsoluteConstraint
+def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_ws, t_ws):
+  check_magnitude(r_sa)
+  check_magnitude(r_wa)
+  check_magnitude(r_ws)
+
+  R_ws = ax2Rot(r_ws)
+  r_wa_est = axAdd( r_ws, r_sa ) # r_wa_est = Rot2ax( ax2Rot(r_ws).dot( ax2Rot(r_sa) ) )
+  t_wa_est = t_ws + R_ws.dot(t_sa)
+  return np.hstack([t_wa - t_wa_est, r_wa - r_wa_est])
+
+if 1:
+  problem = GaussHelmertProblem()
+  for i in range(num_pos):
+    for s in range(1, num_sensor):
+      problem.AddConstraintWithArray(AbsoluteConstraint,
+                                   [ r_sa_group[s-1], t_sa_group[s-1] ],
+                                   [ r_ws_group_list_noisy[i][0],
+                                     t_ws_group_list_noisy[i][0],
+                                     r_ws_group_list_noisy[i][s],
+                                     t_ws_group_list_noisy[i][s]])
+      problem.SetSigma(r_ws_group_list_noisy[i][s], Cov_r_abs)
+      problem.SetSigma(t_ws_group_list_noisy[i][s], Cov_t_abs)
+  for i in range(num_pos):
+    problem.SetSigma(r_ws_group_list_noisy[i][0], Cov_r_abs)
+    problem.SetSigma(r_ws_group_list_noisy[i][0], Cov_t_abs)
+  problem.SetVarFixed(r_ws_group_list_noisy[0][0])
+  problem.SetVarFixed(t_ws_group_list_noisy[0][0])
+
+  #x_est, e  = SolveWithCVX(problem)
+  x_abs, e, fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
+
+  print x_abs.reshape(-1,6)
+  print r_sa_group[0],t_sa_group[0]
+  print r_sa_group[1],t_sa_group[1]
+  print cov.diagonal()
+#%% RelativeConstraint
+def RelativeConstraint(r_sa, t_sa, r_a, t_a, r_s, t_s):
+  check_magnitude(r_sa)
+  check_magnitude(r_a)
+  check_magnitude(r_s)
+
+  R_sa = ax2Rot(r_sa)
+  R_s  = ax2Rot(r_s)
+  e_t = t_s + R_s.dot(t_sa) - R_sa.dot(t_a) - t_sa
+  e_r = R_sa.dot(r_a) - r_s
   return np.r_[e_t, e_r]
 
-''' generate ground truth trajectories '''
-#  np.random.seed(2)
-T = 1000
-dM = []
-for t in xrange(T):
-  dm = [rotateX(d2r(60+20*np.random.rand(1))).dot(
-        rotateY(d2r(60+20*np.random.rand(1))).dot(
-        rotateZ(d2r(60+20*np.random.rand(1))).dot(
-        translate(1,1,1))))]
-  for h, h_inv in zip(Hm, Hm_inv):
-    dm.append( h.dot(dm[0]).dot(h_inv) )
-  dM.append(dm)
+if 0:
+  problem = GaussHelmertProblem()
+  for i in range(num_pos-1):
+    for s in range(1, num_sensor):
+      problem.AddConstraintWithArray(RelativeConstraint,
+                                   [ r_sa_group[s-1], t_sa_group[s-1] ],
+                                   [ dr_group_list_noisy[i][0],
+                                     dt_group_list_noisy[i][0],
+                                     dr_group_list_noisy[i][s],
+                                     dt_group_list_noisy[i][s]])
+      problem.SetSigma(dr_group_list_noisy[i][s], cov_dr_group_list[i][s])
+      problem.SetSigma(dt_group_list_noisy[i][s], cov_dt_group_list[i][s])
+  for i in range(num_pos-1):
+    problem.SetSigma(dr_group_list_noisy[i][0], cov_dr_group_list[i][0])
+    problem.SetSigma(dt_group_list_noisy[i][0], cov_dt_group_list[i][0])
 
-Sigmas = [(1e-2*np.ones(3), 1e-2*np.ones(3)),
-          (1e-2*np.ones(3), 1e-2*np.ones(3)),
-          (1e-2*np.ones(3), 1e-2*np.ones(3))]
-Weight = [ ( np.diag(1.0/sigma_pair[0]**2),
-             np.diag(1.0/sigma_pair[1]**2) ) for sigma_pair in Sigmas ]
-noise_on = 1
-rs,ts = [], []
-for s in range(S):
-  r,t = [],[]
-  for i in xrange(T):
-    r.append( np.copy( noise_on*Sigmas[s][0]*np.random.randn(3) + Rot2ax(dM[i][s][:3,:3]) ) )
-    t.append( np.copy( noise_on*Sigmas[s][1]*np.random.randn(3) + dM[i][s][:3,3] ) )
-  rs.append(r)
-  ts.append(t)
-
-xi,eta = [],[]
-xi[:] = xi_true[:]
-eta[:] = eta_true[:]
-#%%
-problem = GaussHelmertProblem()
-for i in range(T):
-  for s in range(1, S):
-    problem.AddConstraintWithArray(CalibrationConstraint,
-                                 [ xi[s-1], eta[s-1] ],
-                                 [ rs[0][i], ts[0][i], rs[s][i], ts[s][i] ])
-    problem.SetSigma(rs[s][i], np.diag(Sigmas[s][0]**2))
-    problem.SetSigma(ts[s][i], np.diag(Sigmas[s][1]**2))
-for i in range(T):
-  problem.SetSigma(rs[0][i], np.diag(Sigmas[s][0]**2))
-  problem.SetSigma(ts[0][i], np.diag(Sigmas[s][1]**2))
-
-#    problem.SetParameterization(xi[0], SubsetParameterization([1,1,0]))
-#      problem.SetParameterization(rs[0][i], SubsetParameterization([1,1,0]))
-#SetVarFixed
-#x_est, e  = SolveWithCVX(problem)
-x_est, e, fac = SolveWithGESparse(problem, fac=True)
-
-print x_est.reshape(-1,6)
-
+  #x_est, e  = SolveWithCVX(problem)
+  x_rel, e, fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
+  print x_rel.reshape(-1,6)
+  print r_sa_group[0],t_sa_group[0]
+  print r_sa_group[1],t_sa_group[1]
+  print cov.diagonal()
