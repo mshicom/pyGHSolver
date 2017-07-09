@@ -56,6 +56,46 @@ def Rot2ax(R):
     ln = (0.5*p_div_sinp)*(R-R.T)
     return np.array([ln[2,1], ln[0,2], ln[1,0]])
 
+def axToRodriguez(r):
+  theta_half = 0.5*np.linalg.norm(r)
+  return np.tan(theta_half) / theta_half * r
+
+def axFromRodriguez(m):
+  norm_half = 0.5*np.linalg.norm(m)
+  theta = np.arctan(norm_half)
+  return theta/norm_half * m
+
+def axToCayley(r):
+  theta = np.linalg.norm(r)
+  if theta==0.0:
+    return r
+  return np.tan(0.5*theta) / theta * r
+
+def axFromCayley(u):
+  norm = np.linalg.norm(u)
+  if norm==0.0:
+    return u
+  return 2.0*np.arctan(norm) / norm * u
+
+def fromRodriguez(m):
+  norm_half = 0.5*np.linalg.norm(m)
+  theta = np.arctan(norm_half)
+  return theta/norm_half * m
+
+def axAdd(r1, r2):
+#  m1 = toRodriguez(r1)
+#  m2 = toRodriguez(r2)
+#  m12 = ( 4.0*(m1+m2) + 2.0*skew(m1).dot(m2) ) / (4.0 - m1.dot(m2))
+#  return  fromRodriguez(m12)
+  u1 = axToCayley(r1)
+  u2 = axToCayley(r2)
+  u12 = ( u1+u2 + skew(u1).dot(u2) ) / (1 - u1.dot(u2))
+  return axFromCayley(u12)
+
+def test():
+  r1,r2 = 0.5*np.random.rand(2,3)
+  assert_array_almost_equal( Rot2ax( ax2Rot(r1).dot(ax2Rot(r2)) ),
+                      axAdd( r1, r2) )
 
 def MfromRT(r,t):
     T = np.eye(4)
