@@ -58,6 +58,8 @@ num_sensor = len(T_sa_group) + 1
 
 t_sa_group = map(tFromT, T_sa_group)
 r_sa_group = map(rFromT, T_sa_group)
+print r_sa_group[0],t_sa_group[0]
+print r_sa_group[1],t_sa_group[1]
 
 ''' generate ground truth relative motion '''
 #np.random.seed(2)
@@ -88,45 +90,47 @@ for dT_group in dT_group_list:
 r_ws_group_list = deep_map(rFromT, T_ws_group_list)
 t_ws_group_list = deep_map(tFromT, T_ws_group_list)
 
-''' generate noisy absolute pose measurement, world <- sensor'''
 sigma_r_abs  = 0.002
 sigma_t_abs  = 0.03
-Cov_r_abs = sigma_r_abs**2 * np.eye(3)
-Cov_t_abs = sigma_t_abs**2 * np.eye(3)
 
-def add_noise(sigma):
-  return lambda x: x+sigma*np.random.randn(3)
-r_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_r_abs), r_ws_group_list)
-t_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_t_abs), t_ws_group_list)
-T_ws_group_list_noisy = [[MfromRT(r,t) for r,t in zip(r_group,t_group)]
-                            for r_group,t_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy)]
+def SimNoise(sigma_r_abs, sigma_t_abs):
+  ''' generate noisy absolute pose measurement, world <- sensor'''
+  Cov_r_abs = sigma_r_abs**2 * np.eye(3)
+  Cov_t_abs = sigma_t_abs**2 * np.eye(3)
 
-''' generate (noisy) relative pose measurement from noisy absolute pose, t <- t+1'''
-dT_group_list_noisy = []
-for i in xrange(1, num_pos):
-  dT_group = [ invT(T_last).dot(T) for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]) ]
-  dT_group_list_noisy.append(dT_group)
-dr_group_list_noisy = deep_map(rFromT, dT_group_list_noisy)
-dt_group_list_noisy = deep_map(tFromT, dT_group_list_noisy)
+  def add_noise(sigma):
+    return lambda x: x+sigma*np.random.randn(3)
+  r_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_r_abs), r_ws_group_list)
+  t_ws_group_list_noisy = deep_map(add_noise(1.0*sigma_t_abs), t_ws_group_list)
+  T_ws_group_list_noisy = [[MfromRT(r,t) for r,t in zip(r_group,t_group)]
+                              for r_group,t_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy)]
 
-''' covariance for relative pose measurement '''
-if 1:
-  cov_dr_group_list = []
-  cov_dt_group_list = []
+  ''' generate (noisy) relative pose measurement from noisy absolute pose, t <- t+1'''
+  dT_group_list_noisy = []
   for i in xrange(1, num_pos):
-    cov_r_group,cov_t_group = [],[]
-    for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]):
-      R1 = T_last[:3, :3]
-      t1,t2 = T_last[:3, 3], T[:3, 3]
-      t12 = R1.T.dot(t2-t1)
-      cov_r_12 = Cov_r_abs + R1.T.dot(Cov_r_abs).dot(R1)
-      Jr = skew(-t12)
-      cov_t_12 = Jr.dot(Cov_r_abs).dot(Jr.T) + R1.T.dot(2 * Cov_t_abs).dot(R1)         # t12 = R(t2-t1)
-      cov_r_group.append(cov_r_12)
-      cov_t_group.append(cov_t_12)
-    cov_dr_group_list.append(cov_r_group)
-    cov_dt_group_list.append(cov_t_group)
-else:
+    dT_group = [ invT(T_last).dot(T) for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]) ]
+    dT_group_list_noisy.append(dT_group)
+  dr_group_list_noisy = deep_map(rFromT, dT_group_list_noisy)
+  dt_group_list_noisy = deep_map(tFromT, dT_group_list_noisy)
+
+  ''' covariance for relative pose measurement '''
+#  if 0:
+#    cov_dr_group_list = []
+#    cov_dt_group_list = []
+#    for i in xrange(1, num_pos):
+#      cov_r_group,cov_t_group = [],[]
+#      for T_last,T in zip(T_ws_group_list_noisy[i-1], T_ws_group_list_noisy[i]):
+#        R1 = T_last[:3, :3]
+#        t1,t2 = T_last[:3, 3], T[:3, 3]
+#        t12 = R1.T.dot(t2-t1)
+#        cov_r_12 = Cov_r_abs + R1.T.dot(Cov_r_abs).dot(R1)
+#        Jr = skew(-t12)
+#        cov_t_12 = Jr.dot(Cov_r_abs).dot(Jr.T) + R1.T.dot(2 * Cov_t_abs).dot(R1)         # t12 = R(t2-t1)
+#        cov_r_group.append(cov_r_12)
+#        cov_t_group.append(cov_t_12)
+#      cov_dr_group_list.append(cov_r_group)
+#      cov_dt_group_list.append(cov_t_group)
+#  else:
   @AddJacobian
   def RelT(r1,t1,r2,t2):
     r12 = axAdd(-r1,r2)
@@ -153,88 +157,129 @@ else:
     cov_dr_group_list.append(cov_dr_group)
     cov_dt_group_list.append(cov_dt_group)
 
+  return r_ws_group_list_noisy, t_ws_group_list_noisy, \
+         Cov_r_abs, Cov_t_abs,                         \
+         dr_group_list_noisy, dt_group_list_noisy,     \
+         cov_dr_group_list, cov_dt_group_list
+
+r_ws_group_list_noisy, t_ws_group_list_noisy, \
+Cov_r_abs, Cov_t_abs,                         \
+dr_group_list_noisy, dt_group_list_noisy,     \
+cov_dr_group_list, cov_dt_group_list = SimNoise(sigma_r_abs, sigma_t_abs)
+
+
 #%% AbsoluteConstraint
-def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_ws, t_ws):
-  check_magnitude(r_sa)
-  check_magnitude(r_wa)
-  check_magnitude(r_ws)
+def AbsoluteAdjustment(r_sa_group,            t_sa_group,
+                       r_ws_group_list_noisy, t_ws_group_list_noisy,
+                       Cov_r_abs,             Cov_t_abs,
+                       cov=False):
 
-  R_ws = ax2Rot(r_ws)
-  r_wa_est = axAdd( r_ws, r_sa ) #  Rot2ax( ax2Rot(r_ws).dot( ax2Rot(r_sa) ) )
-  t_wa_est = t_ws + R_ws.dot(t_sa)
-  return np.hstack([t_wa - t_wa_est, r_wa - r_wa_est])
+  def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_ws, t_ws):
+    check_magnitude(r_sa)
+    check_magnitude(r_wa)
+    check_magnitude(r_ws)
 
-#  R_sw = ax2Rot(-r_ws)
-#  r_sa_est = axAdd( -r_ws, r_wa )
-#  t_sa_est = R_sw.dot( -t_ws + t_wa )
-#  return np.hstack([r_sa - r_sa_est, t_sa - t_sa_est])
-  def test():
-    r_wa, t_wa, r_ws, t_ws = np.random.rand(4,3)
+    R_ws = ax2Rot(r_ws)
+    r_wa_est = axAdd( r_ws, r_sa ) #  Rot2ax( ax2Rot(r_ws).dot( ax2Rot(r_sa) ) )
+    t_wa_est = t_ws + R_ws.dot(t_sa)
+    return np.hstack([t_wa - t_wa_est, r_wa - r_wa_est])
 
-    T_as = invT(MfromRT(r_wa, t_wa)).dot( MfromRT(r_ws, t_ws) )
-    r_as, t_as = Rot2ax(T_as[:3,:3]), T_as[:3,3]
+  num_sensor = len(r_ws_group_list_noisy[0])
 
-    R_aw = ax2Rot(r_wa).T
-    r_as_est = axAdd( -r_wa, r_ws )
-    t_as_est = R_aw.dot(t_ws - t_wa)
-    assert_array_almost_equal( r_as, r_as_est )
-    assert_array_almost_equal( t_as, t_as_est )
-if 1:
   problem = GaussHelmertProblem()
-  for i in range(num_pos):
+  for r_ws_group, t_ws_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy):
     for s in range(1, num_sensor):
       problem.AddConstraintWithArray(AbsoluteConstraint,
                                    [ r_sa_group[s-1], t_sa_group[s-1] ],
-                                   [ r_ws_group_list_noisy[i][0],
-                                     t_ws_group_list_noisy[i][0],
-                                     r_ws_group_list_noisy[i][s],
-                                     t_ws_group_list_noisy[i][s]])
-      problem.SetSigma(r_ws_group_list_noisy[i][s], Cov_r_abs)
-      problem.SetSigma(t_ws_group_list_noisy[i][s], Cov_t_abs)
-  for i in range(num_pos):
-    problem.SetSigma(r_ws_group_list_noisy[i][0], Cov_r_abs)
-    problem.SetSigma(t_ws_group_list_noisy[i][0], Cov_t_abs)
+                                   [ r_ws_group[0],   t_ws_group[0],
+                                     r_ws_group[s],   t_ws_group[s]])
+    for s in range(num_sensor):
+      problem.SetSigma(r_ws_group[s], Cov_r_abs)
+      problem.SetSigma(t_ws_group[s], Cov_t_abs)
+
   problem.SetVarFixed(r_ws_group_list_noisy[0][0])
   problem.SetVarFixed(t_ws_group_list_noisy[0][0])
 
   #x_est, e  = SolveWithCVX(problem)
-  x_abs, e, fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
-
-  print x_abs.reshape(-1,6)
-  print r_sa_group[0],t_sa_group[0]
-  print r_sa_group[1],t_sa_group[1]
-  print cov.diagonal()
-#%% RelativeConstraint
-def RelativeConstraint(r_sa, t_sa, r_a, t_a, r_s, t_s):
-  check_magnitude(r_sa)
-  check_magnitude(r_a)
-  check_magnitude(r_s)
-
-  R_sa = ax2Rot(r_sa)
-  R_s  = ax2Rot(r_s)
-  e_t = t_s + R_s.dot(t_sa) - R_sa.dot(t_a) - t_sa
-  e_r = R_sa.dot(r_a) - r_s
-  return np.r_[e_t, e_r]
+  return SolveWithGESparse(problem, fac=True, cov=cov)
 
 if 1:
+  x_abs, e_abs, fac_abs,cov_abs = \
+  AbsoluteAdjustment(r_sa_group,            t_sa_group,
+                     r_ws_group_list_noisy, t_ws_group_list_noisy,
+                     Cov_r_abs,             Cov_t_abs,
+                     True)
+
+#%% RelativeConstraint
+def RelativeAdjustment(r_sa_group,          t_sa_group,
+                       dr_group_list_noisy, dt_group_list_noisy,
+                       cov_dr_group_list,   cov_dt_group_list,
+                       cov=False):
+
+  def RelativeConstraint(r_sa, t_sa, r_a, t_a, r_s, t_s):
+    check_magnitude(r_sa)
+    check_magnitude(r_a)
+    check_magnitude(r_s)
+
+    R_sa = ax2Rot(r_sa)
+    R_s  = ax2Rot(r_s)
+    e_t = t_s + R_s.dot(t_sa) - R_sa.dot(t_a) - t_sa
+    e_r = R_sa.dot(r_a) - r_s
+    return np.r_[e_t, e_r]
+
+  num_sensor = len(dr_group_list_noisy[0])
+
   problem = GaussHelmertProblem()
-  for i in range(num_pos-1):
+  for dr_group, dt_group, cov_dr_group, cov_dt_group in zip(dr_group_list_noisy, dt_group_list_noisy, cov_dr_group_list, cov_dt_group_list):
     for s in range(1, num_sensor):
       problem.AddConstraintWithArray(RelativeConstraint,
                                    [ r_sa_group[s-1], t_sa_group[s-1] ],
-                                   [ dr_group_list_noisy[i][0],
-                                     dt_group_list_noisy[i][0],
-                                     dr_group_list_noisy[i][s],
-                                     dt_group_list_noisy[i][s]])
-      problem.SetSigma(dr_group_list_noisy[i][s], cov_dr_group_list[i][s])
-      problem.SetSigma(dt_group_list_noisy[i][s], cov_dt_group_list[i][s])
-  for i in range(num_pos-1):
-    problem.SetSigma(dr_group_list_noisy[i][0], cov_dr_group_list[i][0])
-    problem.SetSigma(dt_group_list_noisy[i][0], cov_dt_group_list[i][0])
+                                   [ dr_group[0],     dt_group[0],
+                                     dr_group[s],     dt_group[s]])
+    for s in range(num_sensor):
+      problem.SetSigma(dr_group[s], cov_dr_group[s])
+      problem.SetSigma(dt_group[s], cov_dt_group[s])
 
-  #x_est, e  = SolveWithCVX(problem)
-  x_rel, e, fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
-  print x_rel.reshape(-1,6)
-  print r_sa_group[0],t_sa_group[0]
-  print r_sa_group[1],t_sa_group[1]
-  print cov.diagonal()
+  return SolveWithGESparse(problem, fac=True, cov=cov)
+
+if 1:
+  x_rel, e_rel, fac_rel,cov_rel = \
+  RelativeAdjustment(r_sa_group,          t_sa_group,
+                     dr_group_list_noisy, dt_group_list_noisy,
+                     cov_dr_group_list,   cov_dt_group_list,
+                     True)
+
+#%% batch sim
+if 0:
+  x_abs_list, x_rel_list, fac_abs_list, fac_rel_list  = [],[],[],[]
+  for it in range(100):
+    r_ws_group_list_noisy, t_ws_group_list_noisy, Cov_r_abs, Cov_t_abs, dr_group_list_noisy, dt_group_list_noisy, cov_dr_group_list, cov_dt_group_list = SimNoise(sigma_r_abs, sigma_t_abs)
+    try:
+      x_abs, e_abs, fac_abs = \
+      AbsoluteAdjustment(r_sa_group,            t_sa_group,
+                         r_ws_group_list_noisy, t_ws_group_list_noisy,
+                         Cov_r_abs,             Cov_t_abs)
+      x_rel, e_rel, fac_rel = \
+      RelativeAdjustment(r_sa_group,          t_sa_group,
+                         dr_group_list_noisy, dt_group_list_noisy,
+                         cov_dr_group_list,   cov_dt_group_list)
+    except:
+      continue
+    x_abs_list.append(x_abs)
+    x_rel_list.append(x_rel)
+    fac_abs_list.append(fac_abs)
+    fac_rel_list.append(fac_rel)
+
+  x_abs_arr = np.asarray(x_abs_list)
+  x_rel_arr = np.asarray(x_rel_list)
+
+  plt.figure(num='abs')
+  plt.hist(fac_abs_list)
+
+  plt.figure(num='rel')
+  plt.hist(fac_rel_list)
+
+  x_abs_mean = np.mean(x_abs_arr, axis=0)
+  x_rel_mean = np.mean(x_rel_arr, axis=0)
+  x_abs_cov = np.cov(x_abs_arr - x_abs_mean, rowvar=False).diagonal()
+  x_rel_cov = np.cov(x_rel_arr - x_rel_mean, rowvar=False).diagonal()

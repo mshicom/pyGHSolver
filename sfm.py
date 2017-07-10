@@ -371,468 +371,471 @@ class OdometryFrame(object):
 
   def __repr__(self):
     return "OdometryFrame(%s:%s,%s)" % (self.id, self.t_ow, self.r_ow)
-#%
-K = np.array([[100, 0,   250],
-              [0,   100, 250],
-              [0,   0,     1]],'d')
-baseline = None#0.5#
-slam = SLAMSystem(K, baseline)
-slam.Simulation(15,2)
-#slam.Draw()
-#%% ProjectError
-def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
-  check_magnitude(kf_r_cw)
 
-  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
-  p  = K.dot(Pc)
-  uv_predict = p[:2]/p[2]
-  err_u = kf_u - uv_predict[0]
-  err_v = kf_v - uv_predict[1]
-  return np.hstack([err_u,err_v])
+if __name__ == '__main__':
 
-if 0 and baseline is None:
-  fig = plt.figure(figsize=(11,11), num='ba')
-  ax = fig.add_subplot(111, projection='3d')
-  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
-  ax.scatter(Pw[0],Pw[1],Pw[2])
-  ax.set_xlim3d(-3,3)
-  ax.set_ylim3d(-3,3)
-  ax.set_zlim3d(-3,3)
-  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
-  DrawCamera(cam, color='b')
+  #%
+  K = np.array([[100, 0,   250],
+                [0,   100, 250],
+                [0,   0,     1]],'d')
+  baseline = None#0.5#
+  slam = SLAMSystem(K, baseline)
+  slam.Simulation(15,2)
+  #slam.Draw()
+  #%% ProjectError
+  def ProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v):
+    check_magnitude(kf_r_cw)
 
-  problem = GaussHelmertProblem()
-  for kf, mp in product(slam.KFs, slam.MPs):
-    if kf.id is None:
-      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+    Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+    p  = K.dot(Pc)
+    uv_predict = p[:2]/p[2]
+    err_u = kf_u - uv_predict[0]
+    err_v = kf_v - uv_predict[1]
+    return np.hstack([err_u,err_v])
 
-    if mp.id is None:
-      mp.id, _ = problem.AddParameter([mp.xyz_w])
-    u,v = kf.Project(mp.xyz_w)
-    u += np.random.randn(1)
-    v += np.random.randn(1)
-    uv_id, _ = problem.AddObservation([u,v])
-
-    problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
-  problem.SetVarFixed(kf.r_cw)
-  problem.SetVarFixed(kf.t_cw)
-  x,le,fac = SolveWithGESparse(problem, fac=True)
-  print 'variance factor:%f' % fac
-  problem.cv_x.OverWriteOrigin()
-  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
-  DrawCamera(cam, color='r')
-
-#%% ProjectErrorSE3
-def ProjectErrorSE3(kf_se3, mp_xyz_w, kf_u, kf_v):
-  M = Mat(kf_se3)
-  Pc = M[:3,:3].dot(mp_xyz_w) + M[:3,3]
-  p  = K.dot(Pc)
-  uv_predict = p[:2]/p[2]
-  err_u = kf_u - uv_predict[0]
-  err_v = kf_v - uv_predict[1]
-  return np.hstack([err_u,err_v])
-
-if 0 and baseline is None:
-  problem = GaussHelmertProblem()
-  for kf, mp in product(slam.KFs, slam.MPs):
-    if kf.id is None:
-      kf.id, _ = problem.AddParameter([kf.vT_cw])
-      problem.SetParameterization(kf.vT_cw, SE3Parameterization())
-
-    if mp.id is None:
-      mp.id, _ = problem.AddParameter([mp.xyz_w])
-    u,v = kf.Project(mp.xyz_w)
-    u += np.random.randn(1)
-    v += np.random.randn(1)
-    uv_id, _ = problem.AddObservation([u,v])
-
-    problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
-  problem.SetVarFixed(kf.vT_cw)
-  x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
-  print 'variance factor:%f' % fac
-
-#%% ProjectErrorHomo
-h4 = HomogeneousParameterization(4)
-s4 = SphereParameterization(4)
-h3 = HomogeneousParameterization(3)
-
-#def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
-#  check_magnitude(kf_r_cw)
-#  ray_obs = np.hstack([kf_u, kf_v])
-#  ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
-#  return ray_est[:2]/ray_est[-1] - ray_obs
-
-def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
-  check_magnitude(kf_r_cw)
-  ray_obs = np.hstack([kf_u, kf_v, 1.])
-  ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
-  return HomoVectorCollinearError(ray_obs, ray_est)
-
-if 1 and baseline is None:
-  fig = plt.figure(figsize=(11,11), num='ba')
-  ax = fig.add_subplot(111, projection='3d')
-  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
-  ax.scatter(Pw[0],Pw[1],Pw[2])
-  ax.set_xlim3d(-3,3)
-  ax.set_ylim3d(-3,3)
-  ax.set_zlim3d(-3,3)
-  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
-  DrawCamera(cam, color='b')
-
-  problem = GaussHelmertProblem()
-  for kf, mp in product(slam.KFs, slam.MPs):
-    if kf.id is None:
-      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
-
-    if mp.id is None:
-      mp.id, _ = problem.AddParameter([h4.ToHomoSphere(mp.xyz_w)])
-      problem.SetParameterizationWithID(mp.id[0], h4)
-    u,v = kf.Project(mp.xyz_w, True)
-    u += 0.1*np.random.randn(1)
-    v += 0.1*np.random.randn(1)
-    uv_id, _ = problem.AddObservation([u,v])
-
-    problem.AddConstraintWithID(ProjectErrorHomo, kf.id + mp.id, uv_id)
-  problem.SetVarFixed(kf.r_cw)
-  problem.SetVarFixed(kf.t_cw)
-  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
-
-  problem.cv_x.OverWriteOrigin()
-  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
-  DrawCamera(cam, color='r')
-
-#%% StereoProjectError
-
-def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
-  check_magnitude(kf_r_cw)
-
-  Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
-  p  = K.dot(Pc)
-  z_inv = 1/p[2]
-  uv_predict = p[:2]*z_inv
-  err_u = kf_u - uv_predict[0]
-  err_v = kf_v - uv_predict[1]
-  err_du= kf_du - baseline*K[0,0]*z_inv
-  return np.hstack([err_u,err_v,err_du])
-
-if 0 and not baseline is None:
-  problem = GaussHelmertProblem()
-  for kf in slam.KFs:
-    if kf.id is None:
-      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
-
-    for mp in slam.MPs:
-      if np.random.rand(1)>0.5: # random connection with kf
-        continue
-
-      if mp.id is None:
-        mp.id, _ = problem.AddParameter([mp.xyz_w])
-      u,v,du = kf.Project(mp.xyz_w)
-      u += np.random.randn(1)
-      v += np.random.randn(1)
-      du+= np.random.randn(1)
-      uvd_id, _ = problem.AddObservation([u,v,du])
-
-      problem.AddConstraintWithID(StereoProjectError, kf.id + mp.id, uvd_id)
-  # anchor the whole system
-  problem.SetVarFixed(kf.r_cw)
-  problem.SetVarFixed(kf.t_cw)
-  x,le,fac = SolveWithGESparse(problem, fac=True)
-  print 'variance factor:%f' % fac
-
-#%% ExtrinsicError
-def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
-  check_magnitude(r_cw)
-  check_magnitude(r_oc)
-  check_magnitude(r_ow)
-
-  R_co = ax2Rot(r_oc).T
-  r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )
-  t_cw_est = R_co.dot(t_ow - t_oc)
-  return np.hstack([t_cw - t_cw_est, r_cw - r_cw_est])
-  def test():
-    r_oc, t_oc, r_ow, t_ow = np.random.rand(4,3)
-
-    T_cw = invT(MfromRT(r_oc, t_oc)).dot( MfromRT(r_ow, t_ow) )
-    r_cw, t_cw = Rot2ax(T_cw[:3,:3]), T_cw[:3,3]
-
-    R_co = ax2Rot(r_oc).T
-    r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )#R_co.dot(r_ow)#
-    t_cw_est = R_co.dot(t_ow - t_oc)
-    assert_array_equal( r_cw, r_cw_est )
-    assert_array_equal( t_cw, t_cw_est )
-
-if 0 and baseline is None:
-
-  fig = plt.figure(figsize=(11,11), num='cal')
-  ax = fig.add_subplot(111, projection='3d')
-  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
-  ax.scatter(Pw[0],Pw[1],Pw[2])
-  ax.set_xlim3d(-3,3)
-  ax.set_ylim3d(-3,3)
-  ax.set_zlim3d(-3,3)
-  cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
-  DrawCamera(cam, color='b')
-  od = [invT(MfromRT(od.r_ow, od.t_ow)) for od in slam.ODs ]
-  DrawCamera(od, color='r')
-
-  problem = GaussHelmertProblem()
-  se3_id, se3_vec = problem.AddParameter([slam.offset.r_ab, slam.offset.t_ab])
-  for kf, od in zip(slam.KFs, slam.ODs):
-    kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
-    od.id, (r,t) = problem.AddObservation([od.r_ow, od.t_ow])
-    r.array += 0.02*np.random.randn(3)
-    t.array += 0.1*np.random.randn(3)
-    problem.AddConstraintWithID(ExtrinsicError, kf.id + se3_id, od.id)
-    problem.SetSigma(od.r_ow, 0.02**2*np.eye(3))
-    problem.SetSigma(od.t_ow,  0.1**2*np.eye(3))
-
-  for kf, mp in product(slam.KFs, slam.MPs):
-    if mp.id is None:
-      mp.id, _ = problem.AddParameter([mp.xyz_w])
-    u,v = kf.Project(mp.xyz_w)
-    u += np.random.randn(1)
-    v += np.random.randn(1)
-    uv_id, _ = problem.AddObservation([u,v])
-    problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
-  problem.SetVarFixed(slam.KFs[0].r_cw )
-  problem.SetVarFixed(slam.KFs[0].t_cw )
-
-  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
-  print 'variance factor:%f' % fac
-
-#  problem.ViewJacobianPattern()
-  print se3_vec[0].array, se3_vec[1].array
-  print slam.offset.r_ab, slam.offset.t_ab
-#%% ExtrinsicErrorSE3
-def ExtrinsicErrorSE3(vT_cw, vT_oc, vT_ow):
-  T_cw_est = invT( Mat(vT_oc) ).dot( Mat(vT_ow) )
-  return Vec(T_cw_est) - vT_cw
-
-if 0 and baseline is None:
-
-  fig = plt.figure(figsize=(11,11), num='cal')
-  ax = fig.add_subplot(111, projection='3d')
-  Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
-  ax.scatter(Pw[0],Pw[1],Pw[2])
-  ax.set_xlim3d(-3,3)
-  ax.set_ylim3d(-3,3)
-  ax.set_zlim3d(-3,3)
-  cam = [invT( Mat(kf.vT_cw) ) for kf in slam.KFs ]
-  DrawCamera(cam, color='b')
-  od = [invT( Mat(od.vT_ow) ) for od in slam.ODs ]
-  DrawCamera(od, color='r')
-
-  problem = GaussHelmertProblem()
-  se3_id, se3_vec = problem.AddParameter([slam.offset.vT_ab])
-  problem.SetParameterization(slam.offset.vT_ab, SE3Parameterization())
-  for kf, od in zip(slam.KFs, slam.ODs):
-    kf.id, _ = problem.AddParameter([kf.vT_cw])
-    problem.SetParameterization(kf.vT_cw, SE3Parameterization())
-
-    od.id, _ = problem.AddObservation([od.vT_ow])
-    problem.SetParameterization(od.vT_ow, SE3Parameterization())
-    problem.AddConstraintWithID(ExtrinsicErrorSE3, kf.id + se3_id, od.id)
-  problem.SetVarFixed(slam.KFs[0].vT_cw )
-
-  for kf, mp in product(slam.KFs, slam.MPs):
-    if mp.id is None:
-      mp.id, _ = problem.AddParameter([mp.xyz_w])
-    u,v = kf.Project(mp.xyz_w)
-    u += np.random.randn(1)
-    v += np.random.randn(1)
-    uv_id, _ = problem.AddObservation([u,v])
-    problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
-
-#  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
-#  problem.ViewJacobianPattern()
-#  print Mat(se3_vec[0].array)
-#  print Mat(slam.offset.vT_ab)
-
-#%% orbslam
-if 0:
-
-  if not 'tracker' in vars() or 0:
-    import sys
-    sys.path.append("/home/nubot/data/workspace/ORB_SLAM2/src/swig")
-    sys.path.append("/home/kaihong/workspace/ORB_SLAM2/src/swig")
-    import orbslam
-    import cv2
-
-    base_dir = "/home/nubot/data/workspace/ORB_SLAM2/"
-    pic_l_path = "/home/nubot/data/Kitti/image_0/%06d.png"
-    pic_r_path = "/home/nubot/data/Kitti/image_1/%06d.png"
-#    base_dir = "/home/kaihong/workspace/ORB_SLAM2/"
-#    pic_l_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_0/%06d.png"
-#    pic_r_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_1/%06d.png"
-    plt.imread(pic_l_path % 0)
-
-    tracker = orbslam.System( base_dir + "Vocabulary/ORBvoc.bin",
-                              base_dir + "Examples/Stereo/KITTI00-02.yaml",
-                              orbslam.System.STEREO,
-                              False)
-    for i in range(10):
-      im_l = cv2.imread( pic_l_path % i )
-      im_r = cv2.imread( pic_r_path % i )
-      tracker.TrackStereo(im_l, im_r, i)
-      print i
-
-    kfs = [kf for kf in tracker.mpMap.GetAllKeyFrames() if not kf.isBad()]
-    mps = [mp for mp in tracker.mpMap.GetAllMapPoints() if not mp is None and not mp.isBad() ]
-
-    fig = plt.figure(figsize=(11,11))
+  if 0 and baseline is None:
+    fig = plt.figure(figsize=(11,11), num='ba')
     ax = fig.add_subplot(111, projection='3d')
-    Pw = np.hstack(mp.GetWorldPos() for mp in mps)
+    Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
     ax.scatter(Pw[0],Pw[1],Pw[2])
     ax.set_xlim3d(-3,3)
     ax.set_ylim3d(-3,3)
     ax.set_zlim3d(-3,3)
+    cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+    DrawCamera(cam, color='b')
 
-    Mwc = [kf.GetPoseInverse() for kf in kfs ]
-    DrawCamera(Mwc, scale=0.6, color='b')
-#%%
-  """
-  kf.mvuRight = uR;
-  disparity = uL-uR
-  kf.mvDepth = kf.mbf/disparity
-  kf.mbf = baseline * f_x
-  """
+    problem = GaussHelmertProblem()
+    for kf, mp in product(slam.KFs, slam.MPs):
+      if kf.id is None:
+        kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+
+      if mp.id is None:
+        mp.id, _ = problem.AddParameter([mp.xyz_w])
+      u,v = kf.Project(mp.xyz_w)
+      u += np.random.randn(1)
+      v += np.random.randn(1)
+      uv_id, _ = problem.AddObservation([u,v])
+
+      problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
+    problem.SetVarFixed(kf.r_cw)
+    problem.SetVarFixed(kf.t_cw)
+    x,le,fac = SolveWithGESparse(problem, fac=True)
+    print 'variance factor:%f' % fac
+    problem.cv_x.OverWriteOrigin()
+    cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+    DrawCamera(cam, color='r')
+
+  #%% ProjectErrorSE3
+  def ProjectErrorSE3(kf_se3, mp_xyz_w, kf_u, kf_v):
+    M = Mat(kf_se3)
+    Pc = M[:3,:3].dot(mp_xyz_w) + M[:3,3]
+    p  = K.dot(Pc)
+    uv_predict = p[:2]/p[2]
+    err_u = kf_u - uv_predict[0]
+    err_v = kf_v - uv_predict[1]
+    return np.hstack([err_u,err_v])
+
+  if 0 and baseline is None:
+    problem = GaussHelmertProblem()
+    for kf, mp in product(slam.KFs, slam.MPs):
+      if kf.id is None:
+        kf.id, _ = problem.AddParameter([kf.vT_cw])
+        problem.SetParameterization(kf.vT_cw, SE3Parameterization())
+
+      if mp.id is None:
+        mp.id, _ = problem.AddParameter([mp.xyz_w])
+      u,v = kf.Project(mp.xyz_w)
+      u += np.random.randn(1)
+      v += np.random.randn(1)
+      uv_id, _ = problem.AddObservation([u,v])
+
+      problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
+    problem.SetVarFixed(kf.vT_cw)
+    x,le,fac,cov = SolveWithGESparse(problem, fac=True, cov=True)
+    print 'variance factor:%f' % fac
+
+  #%% ProjectErrorHomo
+  h4 = HomogeneousParameterization(4)
+  s4 = SphereParameterization(4)
+  h3 = HomogeneousParameterization(3)
+
+  #def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
+  #  check_magnitude(kf_r_cw)
+  #  ray_obs = np.hstack([kf_u, kf_v])
+  #  ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
+  #  return ray_est[:2]/ray_est[-1] - ray_obs
+
+  def ProjectErrorHomo(kf_r_cw, kf_t_cw, mp_homo_w, kf_u, kf_v):
+    check_magnitude(kf_r_cw)
+    ray_obs = np.hstack([kf_u, kf_v, 1.])
+    ray_est = ax2Rot(kf_r_cw).dot(mp_homo_w[:3]) + kf_t_cw * mp_homo_w[3]
+    return HomoVectorCollinearError(ray_obs, ray_est)
+
+  if 1 and baseline is None:
+    fig = plt.figure(figsize=(11,11), num='ba')
+    ax = fig.add_subplot(111, projection='3d')
+    Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
+    ax.scatter(Pw[0],Pw[1],Pw[2])
+    ax.set_xlim3d(-3,3)
+    ax.set_ylim3d(-3,3)
+    ax.set_zlim3d(-3,3)
+    cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+    DrawCamera(cam, color='b')
+
+    problem = GaussHelmertProblem()
+    for kf, mp in product(slam.KFs, slam.MPs):
+      if kf.id is None:
+        kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+
+      if mp.id is None:
+        mp.id, _ = problem.AddParameter([h4.ToHomoSphere(mp.xyz_w)])
+        problem.SetParameterizationWithID(mp.id[0], h4)
+      u,v = kf.Project(mp.xyz_w, True)
+      u += 0.1*np.random.randn(1)
+      v += 0.1*np.random.randn(1)
+      uv_id, _ = problem.AddObservation([u,v])
+
+      problem.AddConstraintWithID(ProjectErrorHomo, kf.id + mp.id, uv_id)
+    problem.SetVarFixed(kf.r_cw)
+    problem.SetVarFixed(kf.t_cw)
+    x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+
+    problem.cv_x.OverWriteOrigin()
+    cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+    DrawCamera(cam, color='r')
+
+  #%% StereoProjectError
+
+  def StereoProjectError(kf_r_cw, kf_t_cw, mp_xyz_w, kf_u, kf_v, kf_du):
+    check_magnitude(kf_r_cw)
+
+    Pc = ax2Rot(kf_r_cw).dot(mp_xyz_w) + kf_t_cw
+    p  = K.dot(Pc)
+    z_inv = 1/p[2]
+    uv_predict = p[:2]*z_inv
+    err_u = kf_u - uv_predict[0]
+    err_v = kf_v - uv_predict[1]
+    err_du= kf_du - baseline*K[0,0]*z_inv
+    return np.hstack([err_u,err_v,err_du])
+
+  if 0 and not baseline is None:
+    problem = GaussHelmertProblem()
+    for kf in slam.KFs:
+      if kf.id is None:
+        kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+
+      for mp in slam.MPs:
+        if np.random.rand(1)>0.5: # random connection with kf
+          continue
+
+        if mp.id is None:
+          mp.id, _ = problem.AddParameter([mp.xyz_w])
+        u,v,du = kf.Project(mp.xyz_w)
+        u += np.random.randn(1)
+        v += np.random.randn(1)
+        du+= np.random.randn(1)
+        uvd_id, _ = problem.AddObservation([u,v,du])
+
+        problem.AddConstraintWithID(StereoProjectError, kf.id + mp.id, uvd_id)
+    # anchor the whole system
+    problem.SetVarFixed(kf.r_cw)
+    problem.SetVarFixed(kf.t_cw)
+    x,le,fac = SolveWithGESparse(problem, fac=True)
+    print 'variance factor:%f' % fac
+
+  #%% ExtrinsicError
+  def ExtrinsicError(r_cw, t_cw, r_oc, t_oc, r_ow, t_ow):
+    check_magnitude(r_cw)
+    check_magnitude(r_oc)
+    check_magnitude(r_ow)
+
+    R_co = ax2Rot(r_oc).T
+    r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )
+    t_cw_est = R_co.dot(t_ow - t_oc)
+    return np.hstack([t_cw - t_cw_est, r_cw - r_cw_est])
+    def test():
+      r_oc, t_oc, r_ow, t_ow = np.random.rand(4,3)
+
+      T_cw = invT(MfromRT(r_oc, t_oc)).dot( MfromRT(r_ow, t_ow) )
+      r_cw, t_cw = Rot2ax(T_cw[:3,:3]), T_cw[:3,3]
+
+      R_co = ax2Rot(r_oc).T
+      r_cw_est = Rot2ax( R_co.dot(ax2Rot(r_ow)) )#R_co.dot(r_ow)#
+      t_cw_est = R_co.dot(t_ow - t_oc)
+      assert_array_equal( r_cw, r_cw_est )
+      assert_array_equal( t_cw, t_cw_est )
+
+  if 0 and baseline is None:
+
+    fig = plt.figure(figsize=(11,11), num='cal')
+    ax = fig.add_subplot(111, projection='3d')
+    Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
+    ax.scatter(Pw[0],Pw[1],Pw[2])
+    ax.set_xlim3d(-3,3)
+    ax.set_ylim3d(-3,3)
+    ax.set_zlim3d(-3,3)
+    cam = [invT(MfromRT(kf.r_cw, kf.t_cw)) for kf in slam.KFs ]
+    DrawCamera(cam, color='b')
+    od = [invT(MfromRT(od.r_ow, od.t_ow)) for od in slam.ODs ]
+    DrawCamera(od, color='r')
+
+    problem = GaussHelmertProblem()
+    se3_id, se3_vec = problem.AddParameter([slam.offset.r_ab, slam.offset.t_ab])
+    for kf, od in zip(slam.KFs, slam.ODs):
+      kf.id, _ = problem.AddParameter([kf.r_cw, kf.t_cw])
+      od.id, (r,t) = problem.AddObservation([od.r_ow, od.t_ow])
+      r.array += 0.02*np.random.randn(3)
+      t.array += 0.1*np.random.randn(3)
+      problem.AddConstraintWithID(ExtrinsicError, kf.id + se3_id, od.id)
+      problem.SetSigma(od.r_ow, 0.02**2*np.eye(3))
+      problem.SetSigma(od.t_ow,  0.1**2*np.eye(3))
+
+    for kf, mp in product(slam.KFs, slam.MPs):
+      if mp.id is None:
+        mp.id, _ = problem.AddParameter([mp.xyz_w])
+      u,v = kf.Project(mp.xyz_w)
+      u += np.random.randn(1)
+      v += np.random.randn(1)
+      uv_id, _ = problem.AddObservation([u,v])
+      problem.AddConstraintWithID(ProjectError, kf.id + mp.id, uv_id)
+    problem.SetVarFixed(slam.KFs[0].r_cw )
+    problem.SetVarFixed(slam.KFs[0].t_cw )
+
+    x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+    print 'variance factor:%f' % fac
+
+  #  problem.ViewJacobianPattern()
+    print se3_vec[0].array, se3_vec[1].array
+    print slam.offset.r_ab, slam.offset.t_ab
+  #%% ExtrinsicErrorSE3
+  def ExtrinsicErrorSE3(vT_cw, vT_oc, vT_ow):
+    T_cw_est = invT( Mat(vT_oc) ).dot( Mat(vT_ow) )
+    return Vec(T_cw_est) - vT_cw
+
+  if 0 and baseline is None:
+
+    fig = plt.figure(figsize=(11,11), num='cal')
+    ax = fig.add_subplot(111, projection='3d')
+    Pw = np.vstack(mp.xyz_w for mp in slam.MPs).T
+    ax.scatter(Pw[0],Pw[1],Pw[2])
+    ax.set_xlim3d(-3,3)
+    ax.set_ylim3d(-3,3)
+    ax.set_zlim3d(-3,3)
+    cam = [invT( Mat(kf.vT_cw) ) for kf in slam.KFs ]
+    DrawCamera(cam, color='b')
+    od = [invT( Mat(od.vT_ow) ) for od in slam.ODs ]
+    DrawCamera(od, color='r')
+
+    problem = GaussHelmertProblem()
+    se3_id, se3_vec = problem.AddParameter([slam.offset.vT_ab])
+    problem.SetParameterization(slam.offset.vT_ab, SE3Parameterization())
+    for kf, od in zip(slam.KFs, slam.ODs):
+      kf.id, _ = problem.AddParameter([kf.vT_cw])
+      problem.SetParameterization(kf.vT_cw, SE3Parameterization())
+
+      od.id, _ = problem.AddObservation([od.vT_ow])
+      problem.SetParameterization(od.vT_ow, SE3Parameterization())
+      problem.AddConstraintWithID(ExtrinsicErrorSE3, kf.id + se3_id, od.id)
+    problem.SetVarFixed(slam.KFs[0].vT_cw )
+
+    for kf, mp in product(slam.KFs, slam.MPs):
+      if mp.id is None:
+        mp.id, _ = problem.AddParameter([mp.xyz_w])
+      u,v = kf.Project(mp.xyz_w)
+      u += np.random.randn(1)
+      v += np.random.randn(1)
+      uv_id, _ = problem.AddObservation([u,v])
+      problem.AddConstraintWithID(ProjectErrorSE3, kf.id + mp.id, uv_id)
+
+  #  x,le,fac = SolveWithGESparse(problem, maxit=20, fac=True)
+  #  problem.ViewJacobianPattern()
+  #  print Mat(se3_vec[0].array)
+  #  print Mat(slam.offset.vT_ab)
+
+  #%% orbslam
+  if 0:
+
+    if not 'tracker' in vars() or 0:
+      import sys
+      sys.path.append("/home/nubot/data/workspace/ORB_SLAM2/src/swig")
+      sys.path.append("/home/kaihong/workspace/ORB_SLAM2/src/swig")
+      import orbslam
+      import cv2
+
+      base_dir = "/home/nubot/data/workspace/ORB_SLAM2/"
+      pic_l_path = "/home/nubot/data/Kitti/image_0/%06d.png"
+      pic_r_path = "/home/nubot/data/Kitti/image_1/%06d.png"
+  #    base_dir = "/home/kaihong/workspace/ORB_SLAM2/"
+  #    pic_l_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_0/%06d.png"
+  #    pic_r_path = "/media/kaihong/2ADA2A32DA29FAA9/work/calibrate/kitti/sequences/00/image_1/%06d.png"
+      plt.imread(pic_l_path % 0)
+
+      tracker = orbslam.System( base_dir + "Vocabulary/ORBvoc.bin",
+                                base_dir + "Examples/Stereo/KITTI00-02.yaml",
+                                orbslam.System.STEREO,
+                                False)
+      for i in range(10):
+        im_l = cv2.imread( pic_l_path % i )
+        im_r = cv2.imread( pic_r_path % i )
+        tracker.TrackStereo(im_l, im_r, i)
+        print i
+
+      kfs = [kf for kf in tracker.mpMap.GetAllKeyFrames() if not kf.isBad()]
+      mps = [mp for mp in tracker.mpMap.GetAllMapPoints() if not mp is None and not mp.isBad() ]
+
+      fig = plt.figure(figsize=(11,11))
+      ax = fig.add_subplot(111, projection='3d')
+      Pw = np.hstack(mp.GetWorldPos() for mp in mps)
+      ax.scatter(Pw[0],Pw[1],Pw[2])
+      ax.set_xlim3d(-3,3)
+      ax.set_ylim3d(-3,3)
+      ax.set_zlim3d(-3,3)
+
+      Mwc = [kf.GetPoseInverse() for kf in kfs ]
+      DrawCamera(Mwc, scale=0.6, color='b')
+  #%%
+    """
+    kf.mvuRight = uR;
+    disparity = uL-uR
+    kf.mvDepth = kf.mbf/disparity
+    kf.mbf = baseline * f_x
+    """
 
 
-  def GenEdgeStereoSE3ProjectXYZ(fx,fy,cx,cy,bf):
-    def EdgeStereoSE3ProjectXYZ(pw_xyz, r_cw, t_cw, pc_xyd ):
-      check_magnitude(r_cw)
+    def GenEdgeStereoSE3ProjectXYZ(fx,fy,cx,cy,bf):
+      def EdgeStereoSE3ProjectXYZ(pw_xyz, r_cw, t_cw, pc_xyd ):
+        check_magnitude(r_cw)
 
-      pc_xyz = ax2Rot(r_cw).dot(pw_xyz) + t_cw
-      invZ = 1.0/pc_xyz[2]
-#      if invZ > 0:
-#        print "neg inv"
+        pc_xyz = ax2Rot(r_cw).dot(pw_xyz) + t_cw
+        invZ = 1.0/pc_xyz[2]
+  #      if invZ > 0:
+  #        print "neg inv"
 
-      xl = pc_xyz[0]*invZ*fx + cx
-      yl = pc_xyz[1]*invZ*fy + cy
-      dx = bf*invZ    # bf = baseline * f_x
-      return pc_xyd - np.hstack([xl,yl,dx])
-    return EdgeStereoSE3ProjectXYZ
-  EdgeStereoSE3ProjectXYZ = GenEdgeStereoSE3ProjectXYZ(718.86, 718.86, 607.19, 185.21, 386.14)
+        xl = pc_xyz[0]*invZ*fx + cx
+        yl = pc_xyz[1]*invZ*fy + cy
+        dx = bf*invZ    # bf = baseline * f_x
+        return pc_xyd - np.hstack([xl,yl,dx])
+      return EdgeStereoSE3ProjectXYZ
+    EdgeStereoSE3ProjectXYZ = GenEdgeStereoSE3ProjectXYZ(718.86, 718.86, 607.19, 185.21, 386.14)
 
-  class OrbSLAMProblem(GaussHelmertProblem):
-    def __init__(self):
-      self.kf_dict = {}
-      self.mp_dict = {}
-      super(OrbSLAMProblem, self).__init__()
+    class OrbSLAMProblem(GaussHelmertProblem):
+      def __init__(self):
+        self.kf_dict = {}
+        self.mp_dict = {}
+        super(OrbSLAMProblem, self).__init__()
 
-    def FindOrAddKeyFramePosParameter(self, kf):
-      id = kf.mnId
-      kf_xid = self.kf_dict.get(id, None)
-      if not kf_xid is None:
+      def FindOrAddKeyFramePosParameter(self, kf):
+        id = kf.mnId
+        kf_xid = self.kf_dict.get(id, None)
+        if not kf_xid is None:
+          return kf_xid
+
+        kf_pos = kf.GetPose()
+        r, t   = Rot2ax(kf_pos[:3,:3]), kf_pos[:3,3].ravel()
+        kf_xid, _ = self.AddParameter([ r,t ])
+        self.kf_dict[id] = kf_xid
         return kf_xid
 
-      kf_pos = kf.GetPose()
-      r, t   = Rot2ax(kf_pos[:3,:3]), kf_pos[:3,3].ravel()
-      kf_xid, _ = self.AddParameter([ r,t ])
-      self.kf_dict[id] = kf_xid
-      return kf_xid
+      def FindOrAddMapPointParameter(self, mp):
+        id = mp.mnId
+        mp_xid = self.mp_dict.get(id, None)
 
-    def FindOrAddMapPointParameter(self, mp):
-      id = mp.mnId
-      mp_xid = self.mp_dict.get(id, None)
+        if not mp_xid is None:
+          return mp_xid
 
-      if not mp_xid is None:
+        mp_pos = mp.GetWorldPos().ravel()
+        mp_xid, _ = self.AddParameter([mp_pos])
+        self.mp_dict[id] = mp_xid
         return mp_xid
 
-      mp_pos = mp.GetWorldPos().ravel()
-      mp_xid, _ = self.AddParameter([mp_pos])
-      self.mp_dict[id] = mp_xid
-      return mp_xid
+    def GatherCommonMP(kf_list, problem):
+      first_set = None
+      for kf in kf_list:
+        for kp_id, mp in enumerate(kf.GetMapPointMatches()):
+          if mp is None or mp.isBad() or kf.mvuRight[kp_id]<0:
+            continue
+          kf_xid = problem.FindOrAddKeyFramePosParameter(kf) # not eariler because there might not be any valid mp
+          if first_set is None:
+            first_set = copy(kf_xid)
 
-  def GatherCommonMP(kf_list, problem):
-    first_set = None
-    for kf in kf_list:
-      for kp_id, mp in enumerate(kf.GetMapPointMatches()):
-        if mp is None or mp.isBad() or kf.mvuRight[kp_id]<0:
-          continue
-        kf_xid = problem.FindOrAddKeyFramePosParameter(kf) # not eariler because there might not be any valid mp
-        if first_set is None:
-          first_set = copy(kf_xid)
-
-        mp_xid  = problem.FindOrAddMapPointParameter(mp)
-        keypoint= kf.mvKeysUn[kp_id]
-        kp_dx   = 386.14/kf.mvDepth[kp_id]
-        pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
-        l_xid, l_vec = problem.AddObservation([ pc_xyd ] )
-        sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
-        problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
-        problem.SetSigma(pc_xyd, sigma)
-    map(problem.SetVarFixedWithID, first_set)
-    return
+          mp_xid  = problem.FindOrAddMapPointParameter(mp)
+          keypoint= kf.mvKeysUn[kp_id]
+          kp_dx   = 386.14/kf.mvDepth[kp_id]
+          pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
+          l_xid, l_vec = problem.AddObservation([ pc_xyd ] )
+          sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
+          problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
+          problem.SetSigma(pc_xyd, sigma)
+      map(problem.SetVarFixedWithID, first_set)
+      return
 
 
 
-#  kf0 = kfs[2]
-#  # Local KeyFrames: First Breath Search from Current Keyframe
-#  local_kfs = { kf.mnId: kf for kf in kf0.GetBestCovisibilityKeyFrames(2) if not kf.isBad() }
-#
-#  # Local MapPoints seen in Local KeyFrames
-#  local_mps = {}
-#  for kf in local_kfs.values():
-#    mp_dict = { mp.mnId : mp for mp in kf.GetMapPoints()} # all ready filtered mp
-#    local_mps.update( mp_dict )
-#
-#  # Fixed Keyframes. Keyframes that see Local MapPoints but that are not Local Keyframes
-#  all_kfs = {}
-#  for mp in local_mps.values():
-#    all_kfs.update( { kf.mnId: kf for kf, _ in mp.GetObservations().items() if not kf.isBad() } )
-#  fixed_kfs = set(all_kfs) - set(local_kfs)
-#  print "In total mp:%d, kf:%d (%d fixed)" % (len(local_mps), len(all_kfs), len(fixed_kfs))
+  #  kf0 = kfs[2]
+  #  # Local KeyFrames: First Breath Search from Current Keyframe
+  #  local_kfs = { kf.mnId: kf for kf in kf0.GetBestCovisibilityKeyFrames(2) if not kf.isBad() }
+  #
+  #  # Local MapPoints seen in Local KeyFrames
+  #  local_mps = {}
+  #  for kf in local_kfs.values():
+  #    mp_dict = { mp.mnId : mp for mp in kf.GetMapPoints()} # all ready filtered mp
+  #    local_mps.update( mp_dict )
+  #
+  #  # Fixed Keyframes. Keyframes that see Local MapPoints but that are not Local Keyframes
+  #  all_kfs = {}
+  #  for mp in local_mps.values():
+  #    all_kfs.update( { kf.mnId: kf for kf, _ in mp.GetObservations().items() if not kf.isBad() } )
+  #  fixed_kfs = set(all_kfs) - set(local_kfs)
+  #  print "In total mp:%d, kf:%d (%d fixed)" % (len(local_mps), len(all_kfs), len(fixed_kfs))
 
 
-  problem = OrbSLAMProblem()
-  GatherCommonMP(kfs[:5], problem)
-#  kf_xid = problem.FindOrAddKeyFramePosParameter(kf0)
-#  map(problem.SetVarFixedWithID, kf_xid)
-#  for kp_id, mp in enumerate(kf0.GetMapPointMatches()):
-#    if mp is None or mp.isBad() or kf0.mvuRight[kp_id]<0:
-#      continue
-#
-#    mp_xid  = problem.FindOrAddMapPointParameter(mp)
-#    keypoint= kf0.mvKeysUn[kp_id]
-#    kp_x_r  = kf0.mvuRight[kp_id]
-#    kp_dx   = 386.14/kf0.mvDepth[kp_id]
-#    pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
-#    l_xid, l_vec = problem.AddObservation([ pc_xyd ] )
-#    sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
-#
-#    problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
-#    problem.SetSigma(pc_xyd, sigma)
+    problem = OrbSLAMProblem()
+    GatherCommonMP(kfs[:5], problem)
+  #  kf_xid = problem.FindOrAddKeyFramePosParameter(kf0)
+  #  map(problem.SetVarFixedWithID, kf_xid)
+  #  for kp_id, mp in enumerate(kf0.GetMapPointMatches()):
+  #    if mp is None or mp.isBad() or kf0.mvuRight[kp_id]<0:
+  #      continue
+  #
+  #    mp_xid  = problem.FindOrAddMapPointParameter(mp)
+  #    keypoint= kf0.mvKeysUn[kp_id]
+  #    kp_x_r  = kf0.mvuRight[kp_id]
+  #    kp_dx   = 386.14/kf0.mvDepth[kp_id]
+  #    pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
+  #    l_xid, l_vec = problem.AddObservation([ pc_xyd ] )
+  #    sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
+  #
+  #    problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
+  #    problem.SetSigma(pc_xyd, sigma)
 
-#  for kfid, kf in all_kfs.items():
-#    if kf.isBad():
-#      continue
-#    kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
-#    if kfid in fixed_kfs:
-#      map(problem.SetVarFixedWithID, kf_xid)
-#
-#  for mp in local_mps.values():
-#    mp_xid = problem.FindOrAddMapPointParameter(mp)
-#
-#    for kf, kp_id in mp.GetObservations().items():
-#      keypoint = kf.mvKeysUn[kp_id]
-#      kp_x_r = kf.mvuRight[kp_id]
-#      kp_dx  = 386.14/kf.mvDepth[kp_id]
-#      if kp_dx < 0:
-#        continue
-#      kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
-#
-#      pc_xyx = np.r_[keypoint.pt.x, keypoint.pt.y, kp_x_r]
-#      pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
-#
-#      l_xid, _ = problem.AddObservation([ pc_xyd ] )
-#
-#      sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
-#
-#      problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
-#      problem.SetSigma(pc_xyd, sigma)
+  #  for kfid, kf in all_kfs.items():
+  #    if kf.isBad():
+  #      continue
+  #    kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
+  #    if kfid in fixed_kfs:
+  #      map(problem.SetVarFixedWithID, kf_xid)
+  #
+  #  for mp in local_mps.values():
+  #    mp_xid = problem.FindOrAddMapPointParameter(mp)
+  #
+  #    for kf, kp_id in mp.GetObservations().items():
+  #      keypoint = kf.mvKeysUn[kp_id]
+  #      kp_x_r = kf.mvuRight[kp_id]
+  #      kp_dx  = 386.14/kf.mvDepth[kp_id]
+  #      if kp_dx < 0:
+  #        continue
+  #      kf_xid = problem.FindOrAddKeyFramePosParameter(kf)
+  #
+  #      pc_xyx = np.r_[keypoint.pt.x, keypoint.pt.y, kp_x_r]
+  #      pc_xyd = np.r_[keypoint.pt.x, keypoint.pt.y, kp_dx]
+  #
+  #      l_xid, _ = problem.AddObservation([ pc_xyd ] )
+  #
+  #      sigma = np.eye(3)/kf.mvInvLevelSigma2[keypoint.octave]
+  #
+  #      problem.AddConstraintWithID(EdgeStereoSE3ProjectXYZ, mp_xid+kf_xid, l_xid)
+  #      problem.SetSigma(pc_xyd, sigma)
 
-  x, err,fac  = SolveWithGESparse(problem, maxit=8, fac=True)
-#  problem.ViewJacobianPattern()
+    x, err,fac  = SolveWithGESparse(problem, maxit=8, fac=True)
+  #  problem.ViewJacobianPattern()
 
