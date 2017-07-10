@@ -1120,11 +1120,13 @@ class GaussHelmertProblem(object):
       self.mat_sigma.AddElement(dm)
 
 
-  def Plus(self,dx, dl):
+  def Plus(self, dx, dl=None):
     self.cv_dx.flat[:] = dx
-    self.cv_dl.flat[:] = dl
     self.cv_dx.Flush()
-    self.cv_dl.Flush()
+
+    if not dl is None:
+      self.cv_dl.flat[:] = dl
+      self.cv_dl.Flush()
 
 
   def AddConstraintWithArray(self, g, x_list, l_list, g_jac=None):
@@ -1213,28 +1215,17 @@ class GaussHelmertProblem(object):
     return self.cv_res.flat
 
   @property
-  def dim_x(self):
-    return self.cv_x.tail
-
+  def dim_x(self):    return self.cv_x.tail
   @property
-  def dim_l(self):
-    return self.cv_l.tail
-
+  def dim_l(self):    return self.cv_l.tail
   @property
-  def dim_dx(self):
-    return self.cv_dx.tail
-
+  def dim_dx(self):   return self.cv_dx.tail
   @property
-  def dim_dl(self):
-    return self.cv_dl.tail
-
+  def dim_dl(self):   return self.cv_dl.tail
   @property
-  def dim_res(self):
-    return self.cv_res.tail
-
+  def dim_res(self):  return self.cv_res.tail
   @property
-  def dims(self):
-    return [self.dim_x, self.dim_l, self.dim_res ]
+  def dims(self):     return [self.dim_x, self.dim_l, self.dim_res ]
 
   def MakeJacobians(self,**kwarg):
     if self.mat_jac_l is None:
@@ -1647,6 +1638,49 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     ret.append( covariance )
   return ret
 
+
+def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
+  problem.SetUp()
+  res  = problem.CompoundResidual()
+  lc   = problem.CompoundObservation()
+  xc   = problem.CompoundParameters()
+
+  BSBT = MakeAWAT(problem.mat_jac_l, problem.mat_sigma, make_full=True ).BuildSparseMatrix(coo=False)
+  A,B = problem.MakeJacobians(coo=False)
+  Sigma, W = problem.MakeSigmaAndWeightMatrix(coo=False)
+  problem.UpdateJacobian()
+
+  Sgg_factor  = cholesky(BSBT)
+  Sxx_factor  = None
+
+  for it in range(maxit):
+    problem.UpdateJacobian()
+    problem.UpdateResidual()
+    print np.linalg.norm(res)
+    Cg  = - res
+
+    F = Sgg_factor.solve_A(A)   # W * A = F -->> A = BSBT * F
+                                # ATW = (BSBT * F).T / BSBT = F.T
+    ATWA= (A.T * F).T           # to maintain in csc
+    if Sxx_factor is None:
+      Sxx_factor = cholesky(ATWA)
+    else:
+      Sxx_factor.cholesky_inplace(ATWA)
+    dx  = Sxx_factor.solve_A( Cg * F )  #np.linalg.solve(ATWA,  ATW.dot(Cg))
+    if np.abs(dx).max() < dx_thres:
+      break
+    problem.Plus(dx)
+
+  ret = [xc, res]
+  if fac:
+    factor = (res * W).dot(res) / (problem.dim_res - problem.dim_dx)
+    print 'variance factor:%f' % factor
+    ret.append(factor)
+  if cov:
+    covariance = Sxx_factor.inv()
+    ret.append( covariance )
+  return ret
+
 def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   problem.SetUp()
   res  = problem.CompoundResidual()
@@ -1886,7 +1920,7 @@ if __name__ == '__main__':
     dim_x = 3
     a = np.ones(dim_x)
 
-    num_l = 10
+    num_l = 100
     sigma = 0.02
     s = sigma**2*np.eye(dim_x)
 
@@ -1901,14 +1935,34 @@ if __name__ == '__main__':
 
 #    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
 #    problem.SetSigma(bs[0], sigma**2*np.eye(2))
+    SolveWithGESparseAsGM(problem,fac=True)
+
     x,le,fac,cov = SolveWithGESparseLM(problem, fac=True, cov=True)
     print fac
     problem.ViewJacobianPattern()
 
 
+  def test_SolveWithGESparseAsGM():
+    dim_x = 3
+    a = np.ones(dim_x)
 
-
-
+    num_l = 100
+    sigma = 0.02
+    s = sigma**2*np.eye(dim_x)
+    x = np.empty((1000, 3))
+    fac = np.empty(1000)
+    for trail in range(1000):
+      bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
+      problem = GaussHelmertProblem()
+      for i in range(num_l):
+        problem.AddConstraintWithArray(lambda x,y:x-y,
+                                     [ a ],
+                                     [ bs[i] ])
+        problem.SetSigma(bs[i], s)
+      x[trail],_, fac[trail] = SolveWithGESparseAsGM(problem,fac=True)
+    plt.hist(fac)
+    np.mean(fac)
+    np.mean(x,axis=0)
 
 
 
