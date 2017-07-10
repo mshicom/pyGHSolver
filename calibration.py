@@ -60,10 +60,10 @@ t_sa_group = map(tFromT, T_sa_group)
 r_sa_group = map(rFromT, T_sa_group)
 
 ''' generate ground truth relative motion '''
-#  np.random.seed(2)
-num_pos = 10
+#np.random.seed(2)
+num_pos = 200
 dT_group_list = [] # T: t <- t+1
-for _ in xrange(num_pos):
+for _ in xrange(num_pos-1):
   # base
   dT_a = rotateX(d2r(10+20*np.random.rand(1))).dot(
          rotateY(d2r(10+20*np.random.rand(1))).dot(
@@ -90,7 +90,7 @@ t_ws_group_list = deep_map(tFromT, T_ws_group_list)
 
 ''' generate noisy absolute pose measurement, world <- sensor'''
 sigma_r_abs  = 0.002
-sigma_t_abs  = 0.02
+sigma_t_abs  = 0.03
 Cov_r_abs = sigma_r_abs**2 * np.eye(3)
 Cov_t_abs = sigma_t_abs**2 * np.eye(3)
 
@@ -110,7 +110,7 @@ dr_group_list_noisy = deep_map(rFromT, dT_group_list_noisy)
 dt_group_list_noisy = deep_map(tFromT, dT_group_list_noisy)
 
 ''' covariance for relative pose measurement '''
-if 0:
+if 1:
   cov_dr_group_list = []
   cov_dt_group_list = []
   for i in xrange(1, num_pos):
@@ -160,10 +160,25 @@ def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_ws, t_ws):
   check_magnitude(r_ws)
 
   R_ws = ax2Rot(r_ws)
-  r_wa_est = axAdd( r_ws, r_sa ) # r_wa_est = Rot2ax( ax2Rot(r_ws).dot( ax2Rot(r_sa) ) )
+  r_wa_est = axAdd( r_ws, r_sa ) #  Rot2ax( ax2Rot(r_ws).dot( ax2Rot(r_sa) ) )
   t_wa_est = t_ws + R_ws.dot(t_sa)
   return np.hstack([t_wa - t_wa_est, r_wa - r_wa_est])
 
+#  R_sw = ax2Rot(-r_ws)
+#  r_sa_est = axAdd( -r_ws, r_wa )
+#  t_sa_est = R_sw.dot( -t_ws + t_wa )
+#  return np.hstack([r_sa - r_sa_est, t_sa - t_sa_est])
+  def test():
+    r_wa, t_wa, r_ws, t_ws = np.random.rand(4,3)
+
+    T_as = invT(MfromRT(r_wa, t_wa)).dot( MfromRT(r_ws, t_ws) )
+    r_as, t_as = Rot2ax(T_as[:3,:3]), T_as[:3,3]
+
+    R_aw = ax2Rot(r_wa).T
+    r_as_est = axAdd( -r_wa, r_ws )
+    t_as_est = R_aw.dot(t_ws - t_wa)
+    assert_array_almost_equal( r_as, r_as_est )
+    assert_array_almost_equal( t_as, t_as_est )
 if 1:
   problem = GaussHelmertProblem()
   for i in range(num_pos):
@@ -178,7 +193,7 @@ if 1:
       problem.SetSigma(t_ws_group_list_noisy[i][s], Cov_t_abs)
   for i in range(num_pos):
     problem.SetSigma(r_ws_group_list_noisy[i][0], Cov_r_abs)
-    problem.SetSigma(r_ws_group_list_noisy[i][0], Cov_t_abs)
+    problem.SetSigma(t_ws_group_list_noisy[i][0], Cov_t_abs)
   problem.SetVarFixed(r_ws_group_list_noisy[0][0])
   problem.SetVarFixed(t_ws_group_list_noisy[0][0])
 
@@ -201,7 +216,7 @@ def RelativeConstraint(r_sa, t_sa, r_a, t_a, r_s, t_s):
   e_r = R_sa.dot(r_a) - r_s
   return np.r_[e_t, e_r]
 
-if 0:
+if 1:
   problem = GaussHelmertProblem()
   for i in range(num_pos-1):
     for s in range(1, num_sensor):
