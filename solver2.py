@@ -1577,12 +1577,12 @@ def SolveWithGEDense(problem, fac=False, cov=False):
     le  += dl
 
   ret = [xc, le]
+  factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+  print 'variance factor:%f' % factor
   if fac:
-    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
-    covariance = np.linalg.inv(ATWA)
+    covariance = factor * np.linalg.inv(ATWA)
     ret.append( covariance )
   return ret
 
@@ -1629,12 +1629,13 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     le  += dl
 
   ret = [xc, le]
+  factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+  print 'variance factor:%f' % factor
+
   if fac:
-    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
-    covariance = Sxx_factor.inv()
+    covariance = factor*Sxx_factor.inv()
     ret.append( covariance )
   return ret
 
@@ -1672,12 +1673,12 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
     problem.Plus(dx)
 
   ret = [xc, res]
+  factor = res.dot( Sgg_factor.solve_A(res) ) / (problem.dim_res - problem.dim_dx)
+  print 'variance factor:%f' % factor
   if fac:
-    factor = res.dot( Sgg_factor.solve_A(res) ) / (problem.dim_res - problem.dim_dx)
-    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
-    covariance = Sxx_factor.inv()
+    covariance = factor*Sxx_factor.inv()
     ret.append( covariance )
   return ret
 
@@ -1750,12 +1751,12 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
       print mu
 
   ret = [xc, le]
+  factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
+  print 'variance factor:%f' % factor
   if fac:
-    factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-    print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
-    covariance = Sxx_factor.inv()
+    covariance = factor*Sxx_factor.inv()
     ret.append( covariance )
   return ret
 #from pykrylov.symmlq import Symmlq
