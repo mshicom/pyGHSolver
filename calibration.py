@@ -49,21 +49,30 @@ def deep_map(function, list_of_list):
     return map(function, list_of_list)
   return [ deep_map(function, l) for l in list_of_list ]
 
+def add_n_noise(sigma):
+  return lambda x: x + sigma*np.random.randn(3)
+def add_u_noise(scale):
+  return lambda x: x + scale*np.random.rand(3)
+
 ''' generate ground truth relative pos between sensors '''
 # s <- a , other <- base
 T_sa_group = [ rotateZ(d2r(10)).dot(translate(1,0,0)),
-              rotateX(d2r(30)).dot(translate(2,0,0))]
+              rotateX(d2r(30)).dot(translate(2,0,0))][:1]
 T_as_group = map(invT, T_sa_group)
 num_sensor = len(T_sa_group) + 1
 
 t_sa_group = map(tFromT, T_sa_group)
 r_sa_group = map(rFromT, T_sa_group)
+
+t_sa_group_noisy = map(add_u_noise(0.05), t_sa_group)
+r_sa_group_noisy = map(add_u_noise(0.1), r_sa_group)
+
 print r_sa_group[0],t_sa_group[0]
-print r_sa_group[1],t_sa_group[1]
+#print r_sa_group[1],t_sa_group[1]
 
 ''' generate ground truth relative motion '''
 #np.random.seed(2)
-num_pos = 100
+num_pos = 20
 dT_group_list = [] # T: t <- t+1
 for _ in xrange(num_pos-1):
   # base
@@ -92,24 +101,23 @@ t_ws_group_list = deep_map(tFromT, T_ws_group_list)
 
 sigma_r_abs  = 0.002
 sigma_t_abs  = 0.03
-sigma_dr_a   = 0.002
-sigma_dt_a   = 0.03
+sigma_dr_a   = 0.003  # = np.sqrt(cov_dr_group_list[0][0].diagonal())
+sigma_dt_a   = 0.043  # = np.sqrt(cov_dt_group_list[0][0].diagonal())
 
 def SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a):
-  def add_noise(sigma):
-    return lambda x: x+sigma*np.random.randn(3)
+
   noise_on = 1.0
   ''' generate noisy relative pose measurement for sensor a, a1 <- a2'''
   Cov_dr_a = sigma_dr_a**2 * np.eye(3)
   Cov_dt_a = sigma_dt_a**2 * np.eye(3)
-  dr_a_noisy_list = map(add_noise(noise_on*sigma_dr_a), zip(*dr_group_list)[0])
-  dt_a_noisy_list = map(add_noise(noise_on*sigma_dt_a), zip(*dt_group_list)[0])
+  dr_a_noisy_list = map(add_n_noise(noise_on*sigma_dr_a), zip(*dr_group_list)[0])
+  dt_a_noisy_list = map(add_n_noise(noise_on*sigma_dt_a), zip(*dt_group_list)[0])
 
   ''' generate noisy absolute pose measurement, world <- sensor'''
   Cov_r_abs = sigma_r_abs**2 * np.eye(3)
   Cov_t_abs = sigma_t_abs**2 * np.eye(3)
-  r_ws_group_list_noisy = deep_map(add_noise(noise_on*sigma_r_abs), r_ws_group_list)
-  t_ws_group_list_noisy = deep_map(add_noise(noise_on*sigma_t_abs), t_ws_group_list)
+  r_ws_group_list_noisy = deep_map(add_n_noise(noise_on*sigma_r_abs), r_ws_group_list)
+  t_ws_group_list_noisy = deep_map(add_n_noise(noise_on*sigma_t_abs), t_ws_group_list)
   T_ws_group_list_noisy = [[MfromRT(r,t) for r,t in zip(r_group,t_group)]
                               for r_group,t_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy)]
 
@@ -215,14 +223,14 @@ def AbsoluteAdjustment(r_sa_group,            t_sa_group,
   #x_est, e  = SolveWithCVX(problem)
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
-if 0:
+if 1:
   x_abs, e_abs, fac_abs,cov_abs = \
-  AbsoluteAdjustment(r_sa_group,            t_sa_group,
+  AbsoluteAdjustment(r_sa_group_noisy,      t_sa_group_noisy,
                      r_ws_group_list_noisy, t_ws_group_list_noisy,
                      Cov_r_abs,             Cov_t_abs,
                      True)
-  print x_abs.reshape(-1,6)
-  print cov_abs.diagonal()
+  print "x_abs: ",x_abs.reshape(-1,6)
+  print "cov_abs: ", cov_abs.diagonal()
 #%% RelativeConstraint
 def RelativeAdjustment(r_sa_group,          t_sa_group,
                        dr_group_list_noisy, dt_group_list_noisy,
@@ -255,14 +263,14 @@ def RelativeAdjustment(r_sa_group,          t_sa_group,
 
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
-if 0:
+if 1:
   x_rel, e_rel, fac_rel,cov_rel = \
-  RelativeAdjustment(r_sa_group,          t_sa_group,
+  RelativeAdjustment(r_sa_group_noisy,    t_sa_group_noisy,
                      dr_group_list_noisy, dt_group_list_noisy,
                      cov_dr_group_list,   cov_dt_group_list,
                      True)
-  print x_rel.reshape(-1,6)
-  print cov_rel.diagonal()
+  print "x_rel: ",x_rel.reshape(-1,6)
+  print "cov_rel: ", cov_rel.diagonal()
 #%% MixConstraint
 def MixedAdjustment(r_sa_group,          t_sa_group,
                     dr_a_noisy_list,     dt_a_noisy_list,
@@ -309,18 +317,18 @@ def MixedAdjustment(r_sa_group,          t_sa_group,
 
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
-if 0:
+if 1:
   x_mix, e_mix, fac_mix,cov_mix = \
-  MixedAdjustment(r_sa_group,          t_sa_group,
+  MixedAdjustment(r_sa_group_noisy,    t_sa_group_noisy,
                   dr_a_noisy_list,     dt_a_noisy_list,
                   Cov_dr_a,            Cov_dt_a,
                   r_ws_group_list_noisy, t_ws_group_list_noisy,
                   Cov_r_abs,            Cov_t_abs,
                   cov=True)
-  print x_mix.reshape(-1,6)
-  print cov_mix.diagonal()
+  print "x_mix: ",x_mix.reshape(-1,6)
+  print "cov_mix: ", cov_mix.diagonal()
 #%% batch sim
-if 1:
+if 0:
   x_abs_list,   x_rel_list,   x_mix_list   = [],[],[]
   fac_abs_list, fac_rel_list, fac_mix_list = [],[],[]
   for it in range(1000):
