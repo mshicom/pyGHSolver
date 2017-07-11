@@ -1673,7 +1673,7 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
 
   ret = [xc, res]
   if fac:
-    factor = (res * W).dot(res) / (problem.dim_res - problem.dim_dx)
+    factor = res.dot( Sgg_factor.solve_A(res) ) / (problem.dim_res - problem.dim_dx)
     print 'variance factor:%f' % factor
     ret.append(factor)
   if cov:
