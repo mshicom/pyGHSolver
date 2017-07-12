@@ -1636,6 +1636,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     ret.append(factor)
   if cov:
     covariance = factor*Sxx_factor.inv()
+#    covariance = Sxx_factor.inv()
     ret.append( covariance )
   return ret
 

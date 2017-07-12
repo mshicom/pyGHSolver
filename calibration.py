@@ -38,6 +38,7 @@ d2r =  lambda deg: np.pi*deg/180
 tFromT = lambda T: T[:3,3].copy()
 rFromT = lambda T: Rot2ax(T[:3,:3])
 
+
 def deep_map(function, list_of_list):
   """ ret = [ map(func, list) for list in list_of_list ]
   Example
@@ -48,12 +49,13 @@ def deep_map(function, list_of_list):
     return map(function, list_of_list)
   return [ deep_map(function, l) for l in list_of_list ]
 
+
 def add_n_noise(sigma):
   return lambda x: x + sigma*np.random.randn(3)
 def add_u_noise(scale):
   return lambda x: x + scale*np.random.rand(3)
 noise_on = 1.0
-#np.random.seed(2)
+np.random.seed(10)
 
 ''' generate ground truth relative pos between sensors '''
 # s <- a , other <- base
@@ -73,39 +75,39 @@ print r_sa_group[0],t_sa_group[0]
 
 ''' generate ground truth relative motion '''
 num_pos = 50
-dT_group_list = [] # T: t <- t+1
-for _ in xrange(num_pos-1):
-  # base
-  dT_a = rotateX(d2r(10+20*np.random.rand(1))).dot(
-         rotateY(d2r(10+20*np.random.rand(1))).dot(
-         rotateZ(d2r(10+20*np.random.rand(1))).dot(
-         translate(1,1,1))))
-  # others
-  dT_other = [T_sa.dot(dT_a).dot(T_as) for T_sa,T_as in zip(T_sa_group, T_as_group)]
+def SimMotion(num_pos, base=10, mag=5):
+  dT_group_list = [] # T: t <- t+1
+  for _ in xrange(num_pos-1):
+    # base
+    dT_a = MfromRT( d2r(base + mag*np.random.rand(1)) * randsp(), 5*np.random.rand(1) * randsp() )
+    # others
+    dT_other = [T_sa.dot(dT_a).dot(T_as) for T_sa,T_as in zip(T_sa_group, T_as_group)]
 
-  dT_group_list.append([dT_a] + dT_other )
+    dT_group_list.append([dT_a] + dT_other )
 
-dr_group_list = deep_map(rFromT, dT_group_list)
-dt_group_list = deep_map(tFromT, dT_group_list)
+  dr_group_list = deep_map(rFromT, dT_group_list)
+  dt_group_list = deep_map(tFromT, dT_group_list)
 
+  ''' generate ground truth absolute pose, world <- sensor'''
+  #T_ws_group0 = [ np.eye(4) ]+T_as_group
+  T_ws_group0 = [ np.eye(4)  ]*num_sensor
+  T_ws_group_list = [ T_ws_group0 ]  #  M[t+1][s] = M[t][s] * dT[t][s], s = 0...S
+  for dT_group in dT_group_list:
+    T_last_group = T_ws_group_list[-1]
+    T_ws_group_list.append( [ T_s.dot(dT_s) for T_s, dT_s in zip(T_last_group, dT_group) ]  )
 
-''' generate ground truth absolute pose, world <- sensor'''
-#T_ws_group0 = [ np.eye(4) ]+T_as_group
-T_ws_group0 = [ np.eye(4)  ]*num_sensor
-T_ws_group_list = [ T_ws_group0 ]  #  M[t+1][s] = M[t][s] * dT[t][s], s = 0...S
-for dT_group in dT_group_list:
-  T_last_group = T_ws_group_list[-1]
-  T_ws_group_list.append( [ T_s.dot(dT_s) for T_s, dT_s in zip(T_last_group, dT_group) ]  )
-
-r_ws_group_list = deep_map(rFromT, T_ws_group_list)
-t_ws_group_list = deep_map(tFromT, T_ws_group_list)
+  r_ws_group_list = deep_map(rFromT, T_ws_group_list)
+  t_ws_group_list = deep_map(tFromT, T_ws_group_list)
+  return r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list
+r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list =  SimMotion(num_pos)
 
 sigma_r_abs  = 0.002
 sigma_t_abs  = 0.03
 sigma_dr_a   = 0.003  # = np.sqrt(cov_dr_group_list[0][0].diagonal())
 sigma_dt_a   = 0.043  # = np.sqrt(cov_dt_group_list[0][0].diagonal())
 
-def SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a):
+def SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a, \
+             r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list):
 
   ''' generate noisy relative pose measurement for sensor a, a1 <- a2'''
   Cov_dr_a = sigma_dr_a**2 * np.eye(3)
@@ -121,6 +123,7 @@ def SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a):
   T_ws_group_list_noisy = [[MfromRT(r,t) for r,t in zip(r_group,t_group)]
                               for r_group,t_group in zip(r_ws_group_list_noisy, t_ws_group_list_noisy)]
 
+  num_pos = len(T_ws_group_list_noisy)
   ''' generate (noisy) relative pose measurement from noisy absolute pose, t <- t+1'''
   dT_group_list_noisy = []
   for i in xrange(1, num_pos):
@@ -185,7 +188,8 @@ Cov_r_abs, Cov_t_abs,                         \
 dr_group_list_noisy, dt_group_list_noisy,     \
 cov_dr_group_list, cov_dt_group_list,         \
 dr_a_noisy_list, dt_a_noisy_list,             \
-Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a)
+Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a, \
+                              r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list)
 
 
 #%% AbsoluteConstraint1
@@ -234,8 +238,9 @@ def AbsoluteAdjustment(r_sa_group,            t_sa_group,
       problem.SetSigma(r_ws_group[s], Cov_r_abs)
       problem.SetSigma(t_ws_group[s], Cov_t_abs)
 
-#  problem.SetVarFixed(r_ws_group_list_noisy[0][0])
-#  problem.SetVarFixed(t_ws_group_list_noisy[0][0])
+
+#  problem.SetVarFixed(r_ws_group_list_noisy[1][0])
+#  problem.SetVarFixed(t_ws_group_list_noisy[1][0])
 
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
@@ -280,7 +285,7 @@ def RelativeAdjustment(r_sa_group,          t_sa_group,
 
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
-if 1:
+if 0:
   x_rel, e_rel, fac_rel,cov_rel = \
   RelativeAdjustment(r_sa_group_noisy,    t_sa_group_noisy,
                      dr_group_list_noisy, dt_group_list_noisy,
@@ -334,7 +339,7 @@ def MixedAdjustment(r_sa_group,          t_sa_group,
 
   return SolveWithGESparse(problem, fac=True, cov=cov)
 
-if 1:
+if 0:
   x_mix, e_mix, fac_mix,cov_mix = \
   MixedAdjustment(r_sa_group_noisy,    t_sa_group_noisy,
                   dr_a_noisy_list,     dt_a_noisy_list,
@@ -344,6 +349,113 @@ if 1:
                   cov=True)
   print "x_mix: ",x_mix.reshape(-1,6)
   print "cov_mix: ", cov_mix.diagonal()
+#%% rel/abs difference on rotation angle
+if 0:
+  """  abs/rel ratio of covariance matrix diagonal elements, at different rotation angles, num_pos=50
+  sigma_r_abs  = 0.002
+  sigma_t_abs  = 0.03
+  seed = 5,13
+  result:
+     0  : array([ 0.122,  0.038,  0.032,  0.07 ,  0.06 ,  0.039]),
+     10 : array([ 0.073,  0.023,  0.023,  0.079,  0.032,  0.044]),
+     20 : array([ 0.065,  0.022,  0.033,  0.074,  0.029,  0.041]),
+     30 : array([ 0.077,  0.042,  0.053,  0.084,  0.054,  0.068]),
+     40 : array([ 0.099,  0.07 ,  0.104,  0.117,  0.099,  0.145]),
+     50 : array([ 0.111,  0.116,  0.123,  0.145,  0.153,  0.168]),
+     60 : array([ 0.137,  0.162,  0.125,  0.186,  0.211,  0.177]),
+     70 : array([ 0.191,  0.17 ,  0.156,  0.262,  0.266,  0.239]),
+     80 : array([ 0.279,  0.175,  0.182,  0.385,  0.352,  0.35 ]),
+     90 : array([ 0.273,  0.23 ,  0.187,  0.514,  0.389,  0.441]),
+     100: array([ 0.265,  0.317,  0.246,  0.576,  0.427,  0.518]),
+     110: array([ 0.353,  0.331,  0.331,  0.555,  0.512,  0.557]),
+     120: array([ 0.413,  0.356,  0.391,  0.585,  0.547,  0.576]),
+     130: array([ 0.461,  0.366,  0.435,  0.652,  0.535,  0.618]),
+     140: array([ 0.519,  0.387,  0.478,  0.703,  0.525,  0.655]),
+     150: array([ 0.594,  0.435,  0.544,  0.743,  0.559,  0.704]),
+     160: array([ 0.593,  0.449,  0.557,  0.748,  0.596,  0.731]),
+     170: array([ 0.546,  0.44 ,  0.534,  0.746,  0.617,  0.723])}
+  """
+  abs_rel_ratio_angle = {}
+  for base in range(0, 180, 10):
+    np.random.seed(5)
+    r_ws_group_list, t_ws_group_list,             \
+    dr_group_list, dt_group_list =  SimMotion(50, base=base)
+
+    np.random.seed(13)
+    r_ws_group_list_noisy, t_ws_group_list_noisy, \
+    Cov_r_abs, Cov_t_abs,                         \
+    dr_group_list_noisy, dt_group_list_noisy,     \
+    cov_dr_group_list, cov_dt_group_list,         \
+    dr_a_noisy_list, dt_a_noisy_list,             \
+    Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a, \
+                                  r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list)
+    try:
+      x_abs, e_abs, fac_abs, cov_abs = \
+      AbsoluteAdjustment(r_sa_group,            t_sa_group,
+                         r_ws_group_list_noisy, t_ws_group_list_noisy,
+                         Cov_r_abs,             Cov_t_abs,
+                         cov=True)
+      x_rel, e_rel, fac_rel, cov_rel = \
+      RelativeAdjustment(r_sa_group,          t_sa_group,
+                         dr_group_list_noisy, dt_group_list_noisy,
+                         cov_dr_group_list,   cov_dt_group_list,
+                         cov=True)
+    except ValueError:
+      continue
+    else:
+      abs_rel_ratio_angle[base] = cov_abs.diagonal()/cov_rel.diagonal()
+  print abs_rel_ratio_angle
+
+if 0:
+  """ abs/rel ratio of covariance matrix diagonal elements, with different number of measurements
+  base_angle = 10
+  sigma_r_abs  = 0.002
+  sigma_t_abs  = 0.03
+  seed = 5,13
+  result:
+     10  : array([ 0.076,  0.061,  0.246,  0.088,  0.061,  0.243]),
+     50  : array([ 0.073,  0.023,  0.023,  0.079,  0.032,  0.044]),
+     100 : array([ 0.063,  0.018,  0.01 ,  0.07 ,  0.037,  0.039]),
+     500 : array([ 0.009,  0.005,  0.005,  0.018,  0.016,  0.022]),
+     1000: array([ 0.004,  0.003,  0.004,  0.012,  0.013,  0.012])}
+     [  2.360e-07   2.370e-07   2.360e-07   1.149e-04   1.131e-04   1.167e-04]
+
+
+  """
+  abs_rel_ratio_num_poses = {}
+  for num_pose in [10, 50, 100, 500, 1000]:
+    np.random.seed(5)
+    r_ws_group_list, t_ws_group_list,             \
+    dr_group_list, dt_group_list =  SimMotion(num_pose, base=10)
+
+    np.random.seed(13)
+    r_ws_group_list_noisy, t_ws_group_list_noisy, \
+    Cov_r_abs, Cov_t_abs,                         \
+    dr_group_list_noisy, dt_group_list_noisy,     \
+    cov_dr_group_list, cov_dt_group_list,         \
+    dr_a_noisy_list, dt_a_noisy_list,             \
+    Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a, \
+                                  r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list)
+    try:
+      x_abs, e_abs, fac_abs, cov_abs = \
+      AbsoluteAdjustment(r_sa_group,            t_sa_group,
+                         r_ws_group_list_noisy, t_ws_group_list_noisy,
+                         Cov_r_abs,             Cov_t_abs,
+                         cov=True)
+      x_rel, e_rel, fac_rel, cov_rel = \
+      RelativeAdjustment(r_sa_group,          t_sa_group,
+                         dr_group_list_noisy, dt_group_list_noisy,
+                         cov_dr_group_list,   cov_dt_group_list,
+                         cov=True)
+    except ValueError:
+      continue
+    else:
+      abs_rel_ratio_num_poses[num_pose] = cov_abs.diagonal()/cov_rel.diagonal()
+      print cov_rel.diagonal()
+      print cov_abs.diagonal()
+
+  print abs_rel_ratio_num_poses
+
 #%% batch sim
 if 0:
   x_abs_list,   x_rel_list,   x_mix_list   = [],[],[]
@@ -354,7 +466,8 @@ if 0:
     dr_group_list_noisy, dt_group_list_noisy,     \
     cov_dr_group_list, cov_dt_group_list,         \
     dr_a_noisy_list, dt_a_noisy_list,             \
-    Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a)
+    Cov_dr_a, Cov_dt_a = SimNoise(sigma_r_abs, sigma_t_abs, sigma_dr_a, sigma_dt_a, \
+                                  r_ws_group_list, t_ws_group_list, dr_group_list, dt_group_list)
     try:
       x_abs, e_abs, fac_abs = \
       AbsoluteAdjustment(r_sa_group,            t_sa_group,
