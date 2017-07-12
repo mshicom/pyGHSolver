@@ -117,51 +117,52 @@ def test_SubsetParameterization():
   print "test_SubsetParameterization passed "
 
 #%% AutoDiffLocalParameterization
-class AutoDiffLocalParameterization(LocalParameterization):
-  def __init__(self, plus_func, x0, delta0):
-    super(AutoDiffLocalParameterization, self).__init__()
+def MakeParameterization(plus_func, x0, delta0):
 
-    self.plus_func = plus_func
-    self.global_size = len(x0)
-    self.local_size  = len(delta0)
+  global_size = len(x0)
+  local_size  = len(delta0)
 
-    in_var = pycppad.independent( np.hstack( [x0, np.zeros(self.local_size)] ) )
-    x_part, delta_part = np.split(in_var, [self.global_size])
-    out_var = plus_func( x_part, delta_part )
-    jac_func = pycppad.adfun(in_var, out_var).jacobian
+  in_var = pycppad.independent( np.hstack( [x0, np.zeros(local_size)] ) )
+  x_part, delta_part = np.split(in_var, [global_size])
+  out_var = plus_func( x_part, delta_part )
+  jac_func = pycppad.adfun(in_var, out_var).jacobian
+  def jac_delta(x):
+    inp = np.hstack( [x, np.zeros(local_size) ])
+    J = solver2.check_nan(jac_func(inp))
+    return J[:, global_size:]
 
-    def jac_delta(x):
-      inp = np.hstack( [x, np.zeros(self.local_size) ])
-      J = jac_func(inp)
-      return J[:, self.global_size:]
-    self.jac_delta = jac_delta
+  class AutoDiffLocalParameterization(LocalParameterization):
+    def __init__(self):
+      super(AutoDiffLocalParameterization, self).__init__()
 
-  def Plus(self, x, delta):
-    return self.plus_func(x, delta)
+    def Plus(self, x, delta):
+      return plus_func(x, delta)
 
-  def ComputeJacobian(self, x):
-    return self.jac_delta(x)
+    def ComputeJacobian(self, x):
+      return jac_delta(x)
 
-  def GlobalSize(self):
-    return self.global_size
+    def GlobalSize(self):
+      return global_size
 
-  def LocalSize(self):
-    return self.local_size
+    def LocalSize(self):
+      return local_size
+
+  return AutoDiffLocalParameterization
 
 def test_AutoDiffLocalParameterization():
   M = np.random.rand(3, 3)
   plus_func = lambda x,delta : x + M.dot(delta)
   x0 = np.empty(3)
   l0 = np.empty(3)
-  par = AutoDiffLocalParameterization(plus_func, x0, l0)
-  assert( np.all( par.ComputeJacobian(x0) == M ) )
+  par = MakeParameterization(plus_func, x0, l0)()
+  assert_array_almost_equal(par.ComputeJacobian(x0), M)
 
   def SubSetPlus(x, delta):
     x_ = x.copy()
     x_[:2] += delta
     return x_
-  par = AutoDiffLocalParameterization(SubSetPlus, x0, l0[:2 ])
-  assert( np.all( par.ComputeJacobian(x0) == np.eye(3)[:,:2] ) )
+  par = MakeParameterization(SubSetPlus, x0, l0[:2 ])()
+  assert_array_almost_equal(par.ComputeJacobian(x0), np.eye(3)[:,:2])
 
   print "test_AutoDiffLocalParameterization passed "
 #%% SE3Parameterization
@@ -575,6 +576,120 @@ def test_HomogeneousParameterization_solve2():
   assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
   print "test_HomogeneousParameterization_solve passed "
 
+#%% AngleAxisParameterization
+
+def ax2Rot(r):
+  phi = np.linalg.norm(r)
+  if np.abs(phi) > 1e-8:
+    sinp_div_p             = np.sin(phi)/phi
+    one_minus_cos_p_div_pp = (1.0-np.cos(phi))/(phi**2)
+  else:
+    sinp_div_p             = 1. - phi**2/6.0 + phi**4/120.0
+    one_minus_cos_p_div_pp = 0.5 - phi**2/24.0 + phi**4/720.0
+
+  S = np.array([[   0, -r[2],  r[1]],
+                [ r[2],    0, -r[0]],
+                [-r[1], r[0],    0 ]])
+
+  return np.eye(3) + sinp_div_p*S + one_minus_cos_p_div_pp*S.dot(S)
+
+
+def Rot2ax(R):
+    tr = 0.5*(np.trace(R)-1)
+    phi= np.arccos(tr)
+    if np.abs(phi) > 1e-8:
+      p_div_sinp = phi/np.sin(phi)
+    else:
+      p_div_sinp = 1 + phi**2 / 6.0 + 7.0/360 * phi**4
+
+    ln = (0.5*p_div_sinp)*(R-R.T)
+    return np.array([ln[2,1], ln[0,2], ln[1,0]])
+
+def axToRodriguez(r):
+  theta_half = 0.5*np.linalg.norm(r)
+  return np.tan(theta_half) / theta_half * r
+
+def axFromRodriguez(m):
+  norm_half = 0.5*np.linalg.norm(m)
+  theta = np.arctan(norm_half)
+  return theta/norm_half * m
+
+def axToCayley(r):
+  theta = np.linalg.norm(r)
+  if theta==0.0:
+    return r
+  return np.tan(0.5*theta) / theta * r
+
+def axFromCayley(u):
+  norm = np.linalg.norm(u)
+  if norm==0.0:
+    return u
+  return 2.0*np.arctan(norm) / norm * u
+
+def axAdd(r1, r2):
+#  m1 = toRodriguez(r1)
+#  m2 = toRodriguez(r2)
+#  m12 = ( 4.0*(m1+m2) + 2.0*skew(m1).dot(m2) ) / (4.0 - m1.dot(m2))
+#  return  fromRodriguez(m12)
+  u1 = axToCayley(r1)
+  u2 = axToCayley(r2)
+  u12 = ( u1+u2 + skew(u1).dot(u2) ) / (1 - u1.dot(u2))
+  return axFromCayley(u12)
+
+def randsp(n=3):
+    v = np.random.uniform(-1, 1, size=n)
+    return v/np.linalg.norm(v)
+
+def test():
+  r1,r2 = 0.5*np.random.rand(2,3)
+  assert_array_almost_equal( Rot2ax( ax2Rot(r1).dot(ax2Rot(r2)) ),
+                      axAdd( r1, r2) )
+
+def MfromRT(r,t):
+  T = np.eye(4)
+  T[:3,:3] = ax2Rot(r)
+  T[:3, 3] = t
+  return T
+
+def invT(T):
+  R, t = T[:3, :3], T[:3, 3]
+
+  if T.dtype==object:
+    Ti = pycppad.a_float(1) * np.eye(4, dtype='d')
+  else:
+    Ti = np.eye(4, dtype='d')
+
+  Ti[:3, :3] = R.T
+  Ti[:3, 3]  = -R.T.dot(t)
+  return Ti
+
+AngleAxisParameterization = MakeParameterization(
+                              lambda x,delta: axAdd(delta,x),
+                              np.r_[0.1,0.1,0.1],
+                              np.r_[0.1,0.1,0.1])
+
+def test_AngleAxisParameterization_solve():
+  pa = AngleAxisParameterization()
+  def iden(x, y):
+    return x - y
+
+  x = np.random.rand(3)
+  facs = np.empty(100)
+  cov = 0.02**2 * np.eye(3)
+  for it in range(len(facs)):
+    y_list = [ axAdd(0.02*np.random.randn(3), x) for i in range(100)]
+    problem = solver2.GaussHelmertProblem()
+    for y in y_list:
+      problem.AddConstraintWithArray(iden, [x], [y])
+      problem.SetParameterization(y, pa)
+      problem.SetSigma(y, cov)
+    problem.SetParameterization(x, pa)
+
+    xs,le,facs[it] = solver2.SolveWithGESparse(problem, maxit=30, fac=True)
+
+  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
+  print "test_AngleAxisParameterization_solve passed "
+
 
 if __name__ == '__main__':
   test_SubsetParameterization()
@@ -587,3 +702,4 @@ if __name__ == '__main__':
   if 0:
     test_SphereParameterization_solve()
     test_HomogeneousParameterization_solve()
+    test_AngleAxisParameterization_solve()

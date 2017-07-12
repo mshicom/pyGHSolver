@@ -8,7 +8,6 @@ Created on Wed Jun  7 14:34:54 2017
 import numpy as np
 import matplotlib.pyplot as plt
 from solver2 import *
-from sfm import invT, ax2Rot, Rot2ax, axAdd, MfromRT
 def rotateX(roll):
     """rotate around x axis"""
     return np.array([[1, 0, 0, 0],
