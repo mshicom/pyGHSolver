@@ -1581,8 +1581,11 @@ def SolveWithGEDense(problem, fac=False, cov=False):
   print 'variance factor:%f' % factor
   if fac:
     ret.append(factor)
+
   if cov:
-    covariance = factor * np.linalg.inv(ATWA)
+    covariance = np.linalg.inv(ATWA)
+    if np.isfinite(factor) and factor!=0 :
+      covariance *= factor
     ret.append( covariance )
   return ret
 
@@ -1635,8 +1638,9 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   if fac:
     ret.append(factor)
   if cov:
-    covariance = factor*Sxx_factor.inv()
-#    covariance = Sxx_factor.inv()
+    covariance = Sxx_factor.inv()
+    if np.isfinite(factor) and factor!=0 :
+      covariance *= factor
     ret.append( covariance )
   return ret
 
@@ -1679,7 +1683,9 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
   if fac:
     ret.append(factor)
   if cov:
-    covariance = factor*Sxx_factor.inv()
+    covariance = Sxx_factor.inv()
+    if np.isfinite(factor) and factor!=0 :
+      covariance *= factor
     ret.append( covariance )
   return ret
 
@@ -1757,7 +1763,9 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   if fac:
     ret.append(factor)
   if cov:
-    covariance = factor*Sxx_factor.inv()
+    covariance = Sxx_factor.inv()
+    if np.isfinite(factor) and factor!=0 :
+      covariance *= factor
     ret.append( covariance )
   return ret
 #from pykrylov.symmlq import Symmlq
