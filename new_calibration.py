@@ -26,7 +26,7 @@ class Pose(object):
   __slots__ = 'id','T','r','t','cov_r','cov_t','rt_id','rt_blk'
   def __init__(self, T, id=None,  cov_r=None, cov_t=None):
     self.id = id
-    self.T = np.copy(T)
+#    self.T = np.copy(T)
     self.r, self.t = rtFromT(T)
     self.cov_r, self.cov_t  = cov_r, cov_t
     self.rt_id, self.rt_blk = None,None
@@ -48,7 +48,11 @@ class Pose(object):
 
   @property
   def R(self):
-    return self.T[:3,:3]
+    return ax2Rot(self.r)
+
+  @property
+  def T(self):
+    return MfromRT(self.r, self.t)
 
   @staticmethod
   def Interpolate(a, b, time):
@@ -218,7 +222,7 @@ class CalibrationProblem(object):
     T21[:3,:3], T21[:3,3] = R21, t21
     return T21
 
-  def MakeProblemWithAbsModel(self, base):
+  def MakeProblemWithAbsModel(self, base, T0_dict={}):
 
     def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_vs, t_vs):
       check_magnitude(r_sa)
@@ -245,7 +249,11 @@ class CalibrationProblem(object):
     opp_key = self.trajectory.keys()
     opp_key.remove(base)
     for key in opp_key:
-      Tob = self.SolveDirect(base, key)
+      if key in T0_dict:
+        Tob = T0_dict[key]
+      else:
+        Tob = self.SolveDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, Tob)
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
       self.calibration[base][key] = Pob
@@ -257,7 +265,7 @@ class CalibrationProblem(object):
                                      p1.rt_id + p2.rt_id )
     return problem
 
-  def MakeProblemWithRelModel(self, base):
+  def MakeProblemWithRelModel(self, base, T0_dict={}):
 
     def RelativeConstraint(r_sa, t_sa, dr_a, dt_a, dr_s, dt_s):
         check_magnitude(r_sa)
@@ -282,7 +290,12 @@ class CalibrationProblem(object):
     opp_key = self.trajectory.keys()
     opp_key.remove(base)
     for key in opp_key:
-      Tob = self.SolveDirect(base, key)
+      if key in T0_dict:
+        Tob = T0_dict[key]
+      else:
+        Tob = self.SolveDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, Tob)
+
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
       self.calibration[base][key] = Pob
@@ -305,6 +318,8 @@ if __name__ == '__main__':
     def add_u_noise(scale):
       return lambda x: x + scale*np.random.rand(3)
     noise_on = 1.0
+    np.random.seed(20)
+
     ConjugateT = lambda dT1, T21 : T21.dot(dT1).dot(invT(T21))
     d2r =  lambda deg: np.pi*deg/180
     def deep_map(function, list_of_list):
@@ -333,13 +348,14 @@ if __name__ == '__main__':
     calp_abs = CalibrationProblem()
     for i in xrange(num_sensor):
       calp_abs[i]= AbsTrajectory.FromPoseData( T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) )
-    problem_abs = calp_abs.MakeProblemWithAbsModel(0)
+    init_guest = {i+1:Tob for i,Tob in enumerate(Tob_all)}#{}#
+    problem_abs = calp_abs.MakeProblemWithAbsModel(0, init_guest)
     x_abs, le_abs, fac_abs = SolveWithGESparse(problem_abs, fac=True)
 #
     calp_rel = CalibrationProblem()
     for key, trj in calp_abs.trajectory.items():
       calp_rel[key] = trj.ToRel(5)
-    problem_rel = calp_rel.MakeProblemWithRelModel(0)
+    problem_rel = calp_rel.MakeProblemWithRelModel(0, init_guest)
     x_rel, le_rel, fac_abs = SolveWithGESparse(problem_rel, fac=True)
 
   #  problem.UpdateXL(True, False)
