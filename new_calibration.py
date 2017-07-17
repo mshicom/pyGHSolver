@@ -18,14 +18,24 @@ tFromT = lambda T: T[:3,3].copy()
 rFromT = lambda T: Rot2ax(T[:3,:3])
 rtFromT= lambda T: ( Rot2ax(T[:3,:3]), T[:3,3].copy() )
 
-#from collections import  OrderedDict
+from collections import  defaultdict, OrderedDict
 
 class Trajectory(object):
-  def __init__(self, T_list, cov_r_list, cov_t_list):
+  def __init__(self, T_list, cov_r_list, cov_t_list, timestamp=None):
+    num_pos = len(T_list)
+    if not isinstance(cov_r_list, list):
+      cov_r_list = [cov_r_list]*num_pos
+    if not isinstance(cov_t_list, list):
+      cov_t_list = [cov_t_list]*num_pos
 
-    self.poses = [Pose(Tws, id, cov_r, cov_t)        \
-                    for id,(Tws, cov_r, cov_t)                          \
-                    in  enumerate(zip(T_list, cov_r_list, cov_t_list))]
+    if timestamp is None:
+      self.poses = [Pose(T, id, cov_r, cov_t)        \
+                      for id,(T, cov_r, cov_t)                          \
+                      in  enumerate(zip(T_list, cov_r_list, cov_t_list))]
+    else:
+      self.poses = [Pose(T, ts, cov_r, cov_t)        \
+                      for ts, T, cov_r, cov_t                          \
+                      in  zip(timestamp, T_list, cov_r_list, cov_t_list)]
 
     self.name = "none"
 
@@ -58,8 +68,8 @@ class RelTrajectory(Trajectory):
     raise NotImplementedError()
 
 class AbsTrajectory(Trajectory):
-  def __init__(self, Tws_list, cov_r_list, cov_t_list):
-    super(AbsTrajectory, self).__init__(Tws_list, cov_r_list, cov_t_list)
+  def __init__(self, Tws_list, cov_r_list, cov_t_list, timestamp=None):
+    super(AbsTrajectory, self).__init__(Tws_list, cov_r_list, cov_t_list, timestamp)
 
   @staticmethod
   @AddJacobian
@@ -118,21 +128,13 @@ class Pose(object):
     return "Pose %s:(%s,%s)" % (self.id, self.r, self.t)
 
 class CalibrationProblem(object):
-  def __init__(self, trj_dict={}):
+  def __init__(self):
     self.trajectory = {}
-    self.param = {}
-    for key,value in trj_dict.items():
-      self.AddTrajectory(key, value[0], value[1], value[2])
+    self.calibration = defaultdict(dict)
 
-  def AddTrajectory(self, id, T_list, cov_r, cov_t, isAbs=True):
-    trajectory_class = AbsTrajectory if isAbs else RelTrajectory
-
-    if isinstance(cov_r, list):
-      self.trajectory[id] = trajectory_class(T_list, cov_r, cov_t)
-    else:
-      num_pos = len(T_list)
-      self.trajectory[id] = trajectory_class(T_list, [cov_r]*num_pos, [cov_t]*num_pos)
-    self.trajectory[id].name = id
+  def __setitem__(self, key, value):
+    assert isinstance(value, Trajectory)
+    self.trajectory[key] = value
 
   def __getitem__(self, key):
     return self.trajectory[key]
@@ -186,7 +188,7 @@ class CalibrationProblem(object):
       Tob = self.SolveDirect(base, key)
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
-      self.param[key] = Pob
+      self.calibration[base][key] = Pob
 
       Popp = self.trajectory[key].poses[1:]
       for p1, p2 in zip(Pbase, Popp):
@@ -223,7 +225,7 @@ class CalibrationProblem(object):
       Tob = self.SolveDirect(base, key)
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
-      self.param[key] = Pob
+      self.calibration[base][key] = Pob
 
       Popp = self.trajectory[key].poses
       for p1, p2 in zip(Pbase, Popp):
@@ -268,13 +270,16 @@ if 1:
   t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
   T_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
 
-  calp_abs = CalibrationProblem({str(i): (T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) ) for i in xrange(num_sensor)})
-  problem_abs = calp_abs.MakeProblemWithAbsModel('0')
+  calp_abs = CalibrationProblem()
+  for i in xrange(num_sensor):
+    calp_abs[i]= AbsTrajectory( T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) )
+  problem_abs = calp_abs.MakeProblemWithAbsModel(0)
   x_abs, le_abs, fac_abs = SolveWithGESparse(problem_abs, fac=True)
 
   calp_rel = CalibrationProblem()
-  calp_rel.trajectory.update({key: trj.ToRel(5) for key, trj in calp_abs.trajectory.items() })
-  problem_rel = calp_rel.MakeProblemWithRelModel('0')
+  for key, trj in calp_abs.trajectory.items():
+    calp_rel[key] = trj.ToRel(5)
+  problem_rel = calp_rel.MakeProblemWithRelModel(0)
   x_rel, le_rel, fac_abs = SolveWithGESparse(problem_rel, fac=True)
 
 #  problem.UpdateXL(True, False)
