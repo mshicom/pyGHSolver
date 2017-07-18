@@ -689,7 +689,38 @@ def test_AngleAxisParameterization_solve():
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   print "test_AngleAxisParameterization_solve passed "
+#%%
+def QuaternionProduct(z,w):
+  return np.array(
+         [z[0] * w[0] - z[1] * w[1] - z[2] * w[2] - z[3] * w[3],
+          z[0] * w[1] + z[1] * w[0] + z[2] * w[3] - z[3] * w[2],
+          z[0] * w[2] - z[1] * w[3] + z[2] * w[0] + z[3] * w[1],
+          z[0] * w[3] + z[1] * w[2] - z[2] * w[1] + z[3] * w[0]] )
 
+class QuaternionParameterization(LocalParameterization):
+  def __init__(self):
+    super(QuaternionParameterization, self).__init__()
+
+  def Plus(self, x, delta):
+    norm_delta = np.linalg.norm(delta)
+    if norm_delta>0:
+      sin_delta_by_delta = np.sin(norm_delta) / norm_delta
+      q_delta = np.array([np.cos(norm_delta), sin_delta_by_delta*delta ])
+      return QuaternionProduct(q_delta, x)
+    else:
+      return x
+
+  def GlobalSize(self):
+    return 4
+
+  def LocalSize(self):
+    return 3
+
+  def ComputeJacobian(self, x):
+    return np.array([ [-x[1], -x[2], -x[3] ],
+                      [ x[0],  x[3], -x[2] ],
+                      [-x[3],  x[0],  x[1] ],
+                      [ x[2], -x[1],  x[0] ] ])
 
 if __name__ == '__main__':
   test_SubsetParameterization()
