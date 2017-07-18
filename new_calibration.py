@@ -115,6 +115,11 @@ class Trajectory(object):
       for p in self.poses:
         p.AddToProblemAsObservation(problem)
 
+  def CollectErrAfterOptimaization(self):
+    r_err = [p.rt_blk[0].err for p in self.poses if p.rt_blk ]
+    t_err = [p.rt_blk[1].err for p in self.poses if p.rt_blk ]
+    return np.vstack(r_err), np.vstack(t_err)
+
   @property
   def r(self):
     return [p.r for p in self.poses]
@@ -307,18 +312,42 @@ class CalibrationProblem(object):
                                      p1.rt_id + p2.rt_id )
     return problem
 
+  def PlotErrHist(self, bins=80):
+    num_trj = len(self.trajectory)
+    f1,(b) = plt.subplots(3, num_trj, sharex=True, sharey=True) #num='r',
+    f2,(c) = plt.subplots(3, num_trj, sharex=True, sharey=True) #num='t',
+    f1.subplots_adjust(hspace=0.02)
+    f1.subplots_adjust(wspace=0.01)
+    f2.subplots_adjust(hspace=0.02)
+    f2.subplots_adjust(wspace=0.01)
 
+    for s, (key,trj) in enumerate(self.trajectory.items()):
+      r_err, t_err = trj.CollectErrAfterOptimaization()
+      for j in range(3):
+        b[j][s].hist( r_err[:,j], bins, edgecolor='None',color='royalblue')
+        c[j][s].hist( t_err[:,j], bins, edgecolor='None',color='royalblue')
+      b[0][s].set_title(str(key),fontsize=20)
+      c[0][s].set_title(str(key),fontsize=20)
+
+    # y axis lable
+    for i in range(3):
+      b[i][0].set_ylabel(r"$\mathbf{r}_%d$" % i,fontsize=20)
+      c[i][0].set_ylabel(r"$\mathbf{t}_%d$" % i,fontsize=20)
+
+
+
+ #%% test
 if __name__ == '__main__':
-  #%% test
+
   if 1:
     num_sensor = 2
-    num_seg = 300
+    num_seg = 1000
     def add_n_noise(sigma):
       return lambda x: x + sigma*np.random.randn(3)
     def add_u_noise(scale):
       return lambda x: x + scale*np.random.rand(3)
     noise_on = 1.0
-    np.random.seed(20)
+#    np.random.seed(20)
 
     ConjugateT = lambda dT1, T21 : T21.dot(dT1).dot(invT(T21))
     d2r =  lambda deg: np.pi*deg/180
@@ -330,7 +359,7 @@ if __name__ == '__main__':
     Tob_all = [ MfromRT(randsp(), randsp()) for _ in xrange(num_sensor-1) ] # other <- base
     r_ob_all = map(rFromT, Tob_all)
     t_ob_all = map(tFromT, Tob_all)
-
+    print Tob_all
     dT_1   = [ MfromRT( d2r(10+5*np.random.rand(1))*randsp(), 0.5*np.random.rand(1) * randsp() ) for _ in xrange(num_seg)]
     dT_all = [dT_1] + [ map(ConjugateT, dT_1, [T21]*num_seg ) for T21 in Tob_all ]
 
@@ -339,38 +368,31 @@ if __name__ == '__main__':
       for dT in dT_trj:
         T_trj.append( T_trj[-1].dot( dT ) )
     r_all = deep_map(rFromT, T_all)
-    r_all_noisy = deep_map(add_n_noise(noise_on*0.002), r_all)
-
     t_all = deep_map(tFromT, T_all)
-    t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
-    T_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
 
-    calp_abs = CalibrationProblem()
-    for i in xrange(num_sensor):
-      calp_abs[i]= AbsTrajectory.FromPoseData( T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) )
-    init_guest = {i+1:Tob for i,Tob in enumerate(Tob_all)}#{}#
-    problem_abs = calp_abs.MakeProblemWithAbsModel(0, init_guest)
-    x_abs, le_abs, fac_abs = SolveWithGESparse(problem_abs, fac=True)
-#
-    calp_rel = CalibrationProblem()
-    for key, trj in calp_abs.trajectory.items():
-      calp_rel[key] = trj.ToRel(5)
-    problem_rel = calp_rel.MakeProblemWithRelModel(0, init_guest)
-    x_rel, le_rel, fac_abs = SolveWithGESparse(problem_rel, fac=True)
+    fac_abs_list,fac_rel_list = [],[]
+    for test in range(1):
+      r_all_noisy = deep_map(add_n_noise(noise_on*0.002), r_all)
+      t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
+      T_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
+
+      print "Abs:"
+      calp_abs = CalibrationProblem()
+      for i in xrange(num_sensor):
+        calp_abs[i]= AbsTrajectory.FromPoseData( T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) )
+      init_guest = {}#{i+1:Tob for i,Tob in enumerate(Tob_all)}#
+      problem_abs = calp_abs.MakeProblemWithAbsModel(0, init_guest)
+      x_abs, le_abs, fac_abs = SolveWithGESparse(problem_abs, fac=True)
+      fac_abs_list.append(fac_abs)
+
+      print "Rel:"
+      calp_rel = CalibrationProblem()
+      for key, trj in calp_abs.trajectory.items():
+        calp_rel[key] = trj.ToRel(5)
+      problem_rel = calp_rel.MakeProblemWithRelModel(0, init_guest)
+      x_rel, le_rel, fac_rel = SolveWithGESparse(problem_rel, fac=True)
+      fac_rel_list.append(fac_rel)
 
   #  problem.UpdateXL(True, False)
   #  print r_ob_all,t_ob_all
   #  print calp.param.values()
-
-  #%% kitti
-  if 0:
-    data = np.load('kitti_abs.npz')
-    T_laser        = [ T for T in data['T_laser']]
-    T_cam, Cov_cam = zip(* [ (T,Cov) for T,Cov in data['T_cam'] ] )
-    T_gps          = [ T for T in data['T_gps']]
-    calp = CalibrationProblem({'laser': (T_laser, 0.02*np.eye(3), 0.02*np.eye(3)),
-                               'camer': (T_cam,   0.02*np.eye(3), 0.02*np.eye(3)),
-                               'gps'  : (T_gps,   0.02*np.eye(3), 0.02*np.eye(3))})
-    calp['camer'].r
-    R = calp.SolveDirect('laser','gps')
-    problem = calp.MakeProblemWithAbsModel('laser')

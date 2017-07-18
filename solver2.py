@@ -927,10 +927,11 @@ class VariableBlock(object):
     return "VariableBlock:%s, %dlinks" % (self.array, len(self.jac))
 
 class ObservationBlock(VariableBlock):
-  __slots__ = 'sigma'
+  __slots__ = 'sigma','err'
   def __init__(self, array):
     super(ObservationBlock, self).__init__(array)
     self.sigma = None
+    self.err = None
   def __repr__(self):
     return "ObservationBlock:%s, %dlinks" % (self.array, len(self.jac))
 
@@ -1060,7 +1061,7 @@ class GaussHelmertProblem(object):
     self.mat_jac_l = SparseBlock()
     self.cv_dx  = CompoundVectorWithMapping()
     self.cv_dl  = CompoundVectorWithMapping()
-
+    self.cv_le  = CompoundVector()
     def EnclosePlus(obj_func):
       def callback(dv, v):
         return obj_func(v, dv)
@@ -1113,6 +1114,8 @@ class GaussHelmertProblem(object):
         dm.InitElement(dm.shape)
         dm.pre_process = pre_process
         self.mat_jac_l.AddElement(dm)
+
+      _, l.err = self.cv_le.NewSegment(dl_dim)
 
       """3. sigma at that pos"""
       dm = DenseMatrix(dl_offset, dl_offset, (dl_dim, dl_dim))
@@ -1536,6 +1539,7 @@ def SolveWithCVX(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
       break
     if np.abs(dx).max() < dx_thres:
       break
+  problem.cv_le.flat[:] = le
 
   ret = [xc, le]
   if fac:
@@ -1575,6 +1579,7 @@ def SolveWithGEDense(problem, fac=False, cov=False):
     dl  = -Sigma * (lag * B) - le  # B.T * lag
     problem.Plus(dx, dl)
     le  += dl
+  problem.cv_le.flat[:] = le
 
   ret = [xc, le]
   factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
@@ -1631,6 +1636,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     problem.Plus(dx, dl)
     le  += dl
 
+  problem.cv_le.flat[:] = le
   ret = [xc, le]
   factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
   print 'variance factor:%f' % factor
@@ -1945,7 +1951,7 @@ if __name__ == '__main__':
 
 #    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
 #    problem.SetSigma(bs[0], sigma**2*np.eye(2))
-    SolveWithGESparseAsGM(problem,fac=True)
+#    SolveWithGESparseAsGM(problem,fac=True)
 
     x,le,fac,cov = SolveWithGESparseLM(problem, fac=True, cov=True)
     print fac
