@@ -30,8 +30,9 @@ class Pose(object):
     self.r, self.t = rtFromT(T)
     self.cov_r, self.cov_t  = cov_r, cov_t
     self.rt_id, self.rt_blk = None,None
-    if not np.isfinite(self.r).all():
-      self.r = np.zeros(3)
+#    if not np.isfinite(self.r).all():
+#      self.r = np.zeros(3)
+    check_magnitude(self.r)
 
   def __repr__(self):
     return "Pose %s:(%s,%s)" % (self.id, self.r, self.t)
@@ -115,10 +116,17 @@ class Trajectory(object):
       for p in self.poses:
         p.AddToProblemAsObservation(problem)
 
-  def CollectErrAfterOptimaization(self):
+  def CollectRTError(self):
     r_err = [p.rt_blk[0].err for p in self.poses if p.rt_blk ]
     t_err = [p.rt_blk[1].err for p in self.poses if p.rt_blk ]
     return np.vstack(r_err), np.vstack(t_err)
+
+  def CollectRTCost(self):
+    cost_func = lambda blk: blk.err.dot( np.linalg.inv(blk.sigma) ).dot(blk.err)
+
+    r_cost = [ cost_func(p.rt_blk[0]) for p in self.poses if p.rt_blk ]
+    t_cost = [ cost_func(p.rt_blk[1]) for p in self.poses if p.rt_blk ]
+    return np.hstack(r_cost), np.hstack(t_cost)
 
   @property
   def r(self):
@@ -191,7 +199,8 @@ class AbsTrajectory(Trajectory):
 
     return RelTrajectory.FromPoseList(pose_list)
 
-
+  def Plot(self, scale=0.5):
+    PlotPose(self.T, scale)
 
 class CalibrationProblem(object):
   def __init__(self):
@@ -230,7 +239,7 @@ class CalibrationProblem(object):
   def MakeProblemWithAbsModel(self, base, T0_dict={}):
 
     def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_vs, t_vs):
-      check_magnitude(r_sa)
+#      check_magnitude(r_sa)
       check_magnitude(r_wa)
       check_magnitude(r_vs)
       r_vw, t_vw = r_sa, t_sa
@@ -273,7 +282,7 @@ class CalibrationProblem(object):
   def MakeProblemWithRelModel(self, base, T0_dict={}):
 
     def RelativeConstraint(r_sa, t_sa, dr_a, dt_a, dr_s, dt_s):
-        check_magnitude(r_sa)
+#        check_magnitude(r_sa)
         check_magnitude(dr_a)
         check_magnitude(dr_s)
 
@@ -322,7 +331,7 @@ class CalibrationProblem(object):
     f2.subplots_adjust(wspace=0.01)
 
     for s, (key,trj) in enumerate(self.trajectory.items()):
-      r_err, t_err = trj.CollectErrAfterOptimaization()
+      r_err, t_err = trj.CollectRTError()
       for j in range(3):
         b[j][s].hist( r_err[:,j], bins, edgecolor='None',color='royalblue')
         c[j][s].hist( t_err[:,j], bins, edgecolor='None',color='royalblue')
@@ -334,7 +343,100 @@ class CalibrationProblem(object):
       b[i][0].set_ylabel(r"$\mathbf{r}_%d$" % i,fontsize=20)
       c[i][0].set_ylabel(r"$\mathbf{t}_%d$" % i,fontsize=20)
 
+  def DetectOutliar(self):
+    robust_sigma = lambda arr : 1.4825*np.median(np.abs(arr), axis=0)
 
+    for s, (key,trj) in enumerate(self.trajectory.items()):
+      r_err, t_err = trj.CollectRTError()
+      r_sig, t_sig = map(robust_sigma, [r_err, t_err])
+
+#%%
+  from vtk_visualizer import plotxyz, get_vtk_control
+  import vtk
+  from vtk.util import numpy_support
+  viz = get_vtk_control()
+  viz.RemoveAllActors()
+
+  def AxesPolyData():
+     # Create input point data.
+    lpts = vtk.vtkPoints()
+    lpts.InsertPoint(0, (0,0,0))
+    lpts.InsertPoint(1, (1,0,0))
+    lpts.InsertPoint(2, (0,1,0))
+    lpts.InsertPoint(3, (0,0,1))
+
+    lines = vtk.vtkCellArray()
+    for i in xrange(1,4):
+      l = vtk.vtkLine()
+      l.GetPointIds().SetId(0, 0)
+      l.GetPointIds().SetId(1, i)
+      lines.InsertNextCell(l)
+
+    # Create a vtkUnsignedCharArray container and store the colors in it
+    colors = vtk.vtkUnsignedCharArray()
+    colors.SetNumberOfComponents(3)
+    colors.SetName("Colors")
+    colors.InsertNextTuple3(255,0,0)
+    colors.InsertNextTuple3(0,255,0)
+    colors.InsertNextTuple3(0,0,255)
+
+    # Add the lines to the polydata container
+    linesPolyData = vtk.vtkPolyData()
+    linesPolyData.SetPoints(lpts)
+    linesPolyData.SetLines(lines)
+    linesPolyData.GetCellData().SetScalars(colors)
+    return linesPolyData
+
+  def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
+
+
+    R_list = [p[:3,:3] for p in pose]
+    t_list = [p[:3,3]  for p in pose]
+
+    points = vtk.vtkPoints()  # where t goes
+    if 1:
+      tensors = vtk.vtkDoubleArray() # where R goes, column major
+      tensors.SetNumberOfComponents(9)
+      for R,t in zip(R_list,t_list):
+        points.InsertNextPoint(*tuple(t))
+        tensors.InsertNextTupleValue( tuple(R.ravel(order='F')) )
+    else:
+      ts = np.hstack(t_list)
+      Rs_flat = np.hstack([ R.ravel(order='F') for R in R_list])
+      points.SetData(numpy_support.numpy_to_vtk(ts))
+      tensors = numpy_support.numpy_to_vtk( Rs_flat )
+
+    polyData = vtk.vtkPolyData()
+    polyData.SetPoints(points)
+    polyData.GetPointData().SetTensors(tensors)
+#    polyData.GetPointData().SetTensors(tensors)
+
+    tensorGlyph= vtk.vtkTensorGlyph()
+    try:
+      tensorGlyph.SetInput(polyData)
+    except:
+      tensorGlyph.SetInputData(polyData)
+
+#    tensorGlyph.SetSourceConnection(cubeSource.GetOutputPort())
+    tensorGlyph.SetScaleFactor(scale)
+    tensorGlyph.SetSourceData(AxesPolyData())
+    tensorGlyph.ColorGlyphsOn()
+    tensorGlyph.SetColorModeToScalars()
+    tensorGlyph.ThreeGlyphsOff()
+    tensorGlyph.ExtractEigenvaluesOff()
+    tensorGlyph.Update()
+
+    mapper= vtk.vtkPolyDataMapper()
+    try:
+      mapper.SetInput(tensorGlyph.GetOutput())
+    except:
+      mapper.SetInputData(tensorGlyph.GetOutput())
+    actor= vtk.vtkActor()
+    actor.SetMapper(mapper)
+
+    if not hold:
+      viz.RemoveAllActors()
+    viz.AddActor(actor)
 
  #%% test
 if __name__ == '__main__':
@@ -393,6 +495,7 @@ if __name__ == '__main__':
       x_rel, le_rel, fac_rel = SolveWithGESparse(problem_rel, fac=True)
       fac_rel_list.append(fac_rel)
 
+    calp_abs[0].Plot(0.2)
   #  problem.UpdateXL(True, False)
   #  print r_ob_all,t_ob_all
   #  print calp.param.values()
