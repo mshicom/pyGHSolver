@@ -78,6 +78,7 @@ class IdentityParameterization(LocalParameterization):
   def UpdataJacobian(self, x):
     pass
 
+
 class SubsetParameterization(LocalParameterization):
   def __init__(self, active_parameters_mask):
     super(SubsetParameterization, self).__init__()
@@ -595,15 +596,25 @@ def ax2Rot(r):
 
 
 def Rot2ax(R):
-    tr = 0.5*(np.trace(R)-1)
-    phi= np.arccos(tr)
-    if np.abs(phi) > 1e-8:
-      p_div_sinp = phi/np.sin(phi)
-    else:
-      p_div_sinp = 1 + phi**2 / 6.0 + 7.0/360 * phi**4
+#    tr = 0.5*(np.trace(R)-1)
+#    phi= np.arccos(tr)
+#    if np.abs(phi) > 1e-8:
+#      p_div_sinp = phi/np.sin(phi)
+#    else:
+#      p_div_sinp = 1 + phi**2 / 6.0 + 7.0/360 * phi**4
+#
+#    ln = (0.5*p_div_sinp)*(R-R.T)
+#    return np.array([ln[2,1], ln[0,2], ln[1,0]])
 
-    ln = (0.5*p_div_sinp)*(R-R.T)
-    return np.array([ln[2,1], ln[0,2], ln[1,0]])
+    tr = np.trace(R)
+    a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
+    an = np.linalg.norm(a)
+    phi= np.arctan2(an, tr-1)
+    if an > 0.0:
+      return phi/an*a
+    else:
+      return np.zeros(3)
+
 
 def axToRodriguez(r):
   theta_half = 0.5*np.linalg.norm(r)
