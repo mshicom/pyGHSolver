@@ -351,92 +351,95 @@ class CalibrationProblem(object):
       r_sig, t_sig = map(robust_sigma, [r_err, t_err])
 
 #%%
-  from vtk_visualizer import plotxyz, get_vtk_control
-  import vtk
-  from vtk.util import numpy_support
-  viz = get_vtk_control()
-  viz.RemoveAllActors()
+from vtk_visualizer import plotxyz, get_vtk_control
+import vtk
+from vtk.util import numpy_support
+viz = get_vtk_control()
+viz.RemoveAllActors()
 
-  def AxesPolyData():
-     # Create input point data.
-    lpts = vtk.vtkPoints()
-    lpts.InsertPoint(0, (0,0,0))
-    lpts.InsertPoint(1, (1,0,0))
-    lpts.InsertPoint(2, (0,1,0))
-    lpts.InsertPoint(3, (0,0,1))
+def AxesPolyData():
+   # Create input point data.
+  lpts = vtk.vtkPoints()
+  lpts.InsertPoint(0, (0,0,0))
+  lpts.InsertPoint(1, (1,0,0))
+  lpts.InsertPoint(2, (0,1,0))
+  lpts.InsertPoint(3, (0,0,1))
 
-    lines = vtk.vtkCellArray()
-    for i in xrange(1,4):
-      l = vtk.vtkLine()
-      l.GetPointIds().SetId(0, 0)
-      l.GetPointIds().SetId(1, i)
-      lines.InsertNextCell(l)
+  lines = vtk.vtkCellArray()
+  for i in xrange(1,4):
+    l = vtk.vtkLine()
+    l.GetPointIds().SetId(0, 0)
+    l.GetPointIds().SetId(1, i)
+    lines.InsertNextCell(l)
 
-    # Create a vtkUnsignedCharArray container and store the colors in it
-    colors = vtk.vtkUnsignedCharArray()
-    colors.SetNumberOfComponents(3)
-    colors.SetName("Colors")
-    colors.InsertNextTuple3(255,0,0)
-    colors.InsertNextTuple3(0,255,0)
-    colors.InsertNextTuple3(0,0,255)
+  # Create a vtkUnsignedCharArray container and store the colors in it
+  colors = vtk.vtkUnsignedCharArray()
+  colors.SetNumberOfComponents(3)
+  colors.SetName("Colors")
+  colors.InsertNextTuple3(255,0,0)
+  colors.InsertNextTuple3(0,255,0)
+  colors.InsertNextTuple3(0,0,255)
 
-    # Add the lines to the polydata container
-    linesPolyData = vtk.vtkPolyData()
-    linesPolyData.SetPoints(lpts)
-    linesPolyData.SetLines(lines)
-    linesPolyData.GetCellData().SetScalars(colors)
-    return linesPolyData
+  # Add the lines to the polydata container
+  linesPolyData = vtk.vtkPolyData()
+  linesPolyData.SetPoints(lpts)
+  linesPolyData.SetLines(lines)
+  linesPolyData.GetCellData().SetScalars(colors)
+  return linesPolyData
 
-  def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
+def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
+  if inv:
+    pose = map(invT, pose)
+  if not base is None:
+    pose = map(lambda p:np.dot(base,p), pose )
 
+  R_list = [p[:3,:3] for p in pose]
+  t_list = [p[:3,3]  for p in pose]
 
-    R_list = [p[:3,:3] for p in pose]
-    t_list = [p[:3,3]  for p in pose]
+  points = vtk.vtkPoints()  # where t goes
+  if 1:
+    tensors = vtk.vtkDoubleArray() # where R goes, column major
+    tensors.SetNumberOfComponents(9)
+    for R,t in zip(R_list,t_list):
+      points.InsertNextPoint(*tuple(t))
+      tensors.InsertNextTupleValue( tuple(R.ravel(order='F')) )
+  else:
+    ts = np.hstack(t_list)
+    Rs_flat = np.hstack([ R.ravel(order='F') for R in R_list])
+    points.SetData(numpy_support.numpy_to_vtk(ts))
+    tensors = numpy_support.numpy_to_vtk( Rs_flat )
 
-    points = vtk.vtkPoints()  # where t goes
-    if 1:
-      tensors = vtk.vtkDoubleArray() # where R goes, column major
-      tensors.SetNumberOfComponents(9)
-      for R,t in zip(R_list,t_list):
-        points.InsertNextPoint(*tuple(t))
-        tensors.InsertNextTupleValue( tuple(R.ravel(order='F')) )
-    else:
-      ts = np.hstack(t_list)
-      Rs_flat = np.hstack([ R.ravel(order='F') for R in R_list])
-      points.SetData(numpy_support.numpy_to_vtk(ts))
-      tensors = numpy_support.numpy_to_vtk( Rs_flat )
-
-    polyData = vtk.vtkPolyData()
-    polyData.SetPoints(points)
-    polyData.GetPointData().SetTensors(tensors)
+  polyData = vtk.vtkPolyData()
+  polyData.SetPoints(points)
+  polyData.GetPointData().SetTensors(tensors)
 #    polyData.GetPointData().SetTensors(tensors)
 
-    tensorGlyph= vtk.vtkTensorGlyph()
-    try:
-      tensorGlyph.SetInput(polyData)
-    except:
-      tensorGlyph.SetInputData(polyData)
+  tensorGlyph= vtk.vtkTensorGlyph()
+  try:
+    tensorGlyph.SetInput(polyData)
+  except:
+    tensorGlyph.SetInputData(polyData)
 
 #    tensorGlyph.SetSourceConnection(cubeSource.GetOutputPort())
-    tensorGlyph.SetScaleFactor(scale)
-    tensorGlyph.SetSourceData(AxesPolyData())
-    tensorGlyph.ColorGlyphsOn()
-    tensorGlyph.SetColorModeToScalars()
-    tensorGlyph.ThreeGlyphsOff()
-    tensorGlyph.ExtractEigenvaluesOff()
-    tensorGlyph.Update()
+  tensorGlyph.SetScaleFactor(scale)
+  tensorGlyph.SetSourceData(AxesPolyData())
+  tensorGlyph.ColorGlyphsOn()
+  tensorGlyph.SetColorModeToScalars()
+  tensorGlyph.ThreeGlyphsOff()
+  tensorGlyph.ExtractEigenvaluesOff()
+  tensorGlyph.Update()
 
-    mapper= vtk.vtkPolyDataMapper()
-    try:
-      mapper.SetInput(tensorGlyph.GetOutput())
-    except:
-      mapper.SetInputData(tensorGlyph.GetOutput())
-    actor= vtk.vtkActor()
-    actor.SetMapper(mapper)
+  mapper= vtk.vtkPolyDataMapper()
+  try:
+    mapper.SetInput(tensorGlyph.GetOutput())
+  except:
+    mapper.SetInputData(tensorGlyph.GetOutput())
+  actor= vtk.vtkActor()
+  actor.SetMapper(mapper)
 
-    if not hold:
-      viz.RemoveAllActors()
-    viz.AddActor(actor)
+  if not hold:
+    viz.RemoveAllActors()
+  viz.AddActor(actor)
 
  #%% test
 if __name__ == '__main__':
