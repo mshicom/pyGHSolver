@@ -173,8 +173,39 @@ class RelTrajectory(Trajectory):
   def __init__(self):
     super(RelTrajectory, self).__init__()
 
-  def ToAbs(self):
-    raise NotImplementedError()
+  @staticmethod
+  @AddJacobian
+  def AbsT(r1,t1,dr,dt):
+    r2 = axAdd(r1,dr)
+    t2 = t1 + ax2Rot(r1).dot(dt)
+    return np.hstack([r2, t2])
+
+  def ToAbs(self, T0=np.eye(4) ):
+    RelTrajectory.AbsT(*[np.random.rand(3)]*4)
+    pose_list = [Pose( T = T0, id = 0, cov_r= np.zeros(3), cov_t= np.zeros(3) )]
+
+    for dp in self.poses:
+      p_last = pose_list[-1]
+      if np.array_equal(p_last.T, np.eye(4)): # a hack when r,t=0
+        pose = Pose( T = dp.T,
+                     id = len(pose_list),
+                     cov_r= dp.cov_r,
+                     cov_t= dp.cov_t)
+      else:
+        rt, J = RelTrajectory.AbsT(p_last.r, p_last.t, dp.r, dp.t)
+
+        J = np.hstack(J)
+        Cov_rel = scipy.linalg.block_diag(p_last.cov_r, p_last.cov_t, dp.cov_r, dp.cov_t)
+        cov_rt = J.dot(Cov_rel).dot(J.T)
+
+        pose = Pose( T = MfromRT(rt[:3],rt[3:]),
+                    id = len(pose_list),
+                    cov_r= cov_rt[0:3,0:3],
+                    cov_t= cov_rt[3:6,3:6] )
+      pose_list.append(pose)
+
+    return AbsTrajectory.FromPoseList(pose_list)
+
 
 class AbsTrajectory(Trajectory):
   def __init__(self):
@@ -186,7 +217,6 @@ class AbsTrajectory(Trajectory):
     r12 = axAdd(-r1,r2)
     t12 = ax2Rot(-r1).dot(t2-t1)
     return np.hstack([r12, t12])
-
 
   def SetFirstPoseFix(self, problem):
     problem.SetVarFixedWithID(self.poses[0].rt_id[0])
