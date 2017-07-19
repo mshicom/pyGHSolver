@@ -47,6 +47,10 @@ class Pose(object):
   def AddToProblemAsParameter(self, problem):
     self.rt_id, self.rt_blk = problem.AddParameter([self.r, self.t])
 
+  def ApplyTransform(self, T):
+    T_new = np.dot(T, self.T)
+    self.r[:], self.t[:] = rtFromT(T_new)
+
   @property
   def R(self):
     return ax2Rot(self.r)
@@ -141,6 +145,12 @@ class Trajectory(object):
   def id(self):
     return [p.id for p in self.poses]
 
+  def __len__(self):
+    return len(self.poses)
+
+  def __getitem__(self, key):
+    return self.poses[key]
+
   def Interpolate(self, sorted_insertion_timestamp):
     sorted_timestep = self.id
     end = len(self.poses)
@@ -199,8 +209,14 @@ class AbsTrajectory(Trajectory):
 
     return RelTrajectory.FromPoseList(pose_list)
 
-  def Plot(self, scale=0.5):
-    PlotPose(self.T, scale)
+  def Plot(self, scale=1, select=slice(None), **kwarg):
+    PlotPose(self.T[select], scale, **kwarg)
+
+  def Rebase(self, T=None):
+    if T is None:
+      T = invT(self.poses[0].T)
+    for p in self.poses:
+      p.ApplyTransform(T)
 
 class CalibrationProblem(object):
   def __init__(self):
@@ -255,6 +271,8 @@ class CalibrationProblem(object):
     """observation"""
     for trj in self.trajectory.values():
       assert isinstance(trj, AbsTrajectory)
+      if not np.allclose( trj[0].T, np.eye(4) ):
+        raise RuntimeWarning('First pose is not Identity, please use trj.Rebase() to make so.')
       trj.AddPosesToProblemAsObservation(problem, skip_first=True)
 
     Pbase = self.trajectory[base].poses[1:]
@@ -270,7 +288,7 @@ class CalibrationProblem(object):
         print "Init guess for %s:\n%s" %(key, Tob)
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
-      self.calibration[base][key] = Pob
+      self.calibration[key][base] = Pob
 
       Popp = self.trajectory[key].poses[1:]
       for p1, p2 in zip(Pbase, Popp):
@@ -312,7 +330,7 @@ class CalibrationProblem(object):
 
       Pob = Pose(Tob)
       Pob.AddToProblemAsParameter(problem)
-      self.calibration[base][key] = Pob
+      self.calibration[key][base] = Pob
 
       Popp = self.trajectory[key].poses
       for p1, p2 in zip(Pbase, Popp):
