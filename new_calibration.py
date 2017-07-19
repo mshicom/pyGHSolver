@@ -256,6 +256,7 @@ class CalibrationProblem(object):
   def __setitem__(self, key, value):
     assert isinstance(value, Trajectory)
     self.trajectory[key] = value
+    value.name = str(key)
 
   def __getitem__(self, key):
     return self.trajectory[key]
@@ -434,8 +435,10 @@ def AxesPolyData():
   linesPolyData.SetLines(lines)
   linesPolyData.GetCellData().SetScalars(colors)
   return linesPolyData
+_axes_pd = AxesPolyData()
+cubeSource = vtk.vtkCubeSource()
 
-def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
+def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255)):
   if inv:
     pose = map(invT, pose)
   if not base is None:
@@ -444,13 +447,16 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
   R_list = [p[:3,:3] for p in pose]
   t_list = [p[:3,3]  for p in pose]
 
+  # pose matrix -> PolyData
   points = vtk.vtkPoints()  # where t goes
+  polyLine = vtk.vtkPolyLine()
   if 1:
     tensors = vtk.vtkDoubleArray() # where R goes, column major
     tensors.SetNumberOfComponents(9)
-    for R,t in zip(R_list,t_list):
+    for i,(R,t) in enumerate(zip(R_list,t_list)):
       points.InsertNextPoint(*tuple(t))
       tensors.InsertNextTupleValue( tuple(R.ravel(order='F')) )
+      polyLine.GetPointIds().InsertNextId(i)
   else:
     ts = np.hstack(t_list)
     Rs_flat = np.hstack([ R.ravel(order='F') for R in R_list])
@@ -460,39 +466,61 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False):
   polyData = vtk.vtkPolyData()
   polyData.SetPoints(points)
   polyData.GetPointData().SetTensors(tensors)
-#    polyData.GetPointData().SetTensors(tensors)
 
+  # PolyData -> tensorGlyph
   tensorGlyph= vtk.vtkTensorGlyph()
   try:
     tensorGlyph.SetInput(polyData)
   except:
     tensorGlyph.SetInputData(polyData)
-
-#    tensorGlyph.SetSourceConnection(cubeSource.GetOutputPort())
   tensorGlyph.SetScaleFactor(scale)
-  tensorGlyph.SetSourceData(AxesPolyData())
-  tensorGlyph.ColorGlyphsOn()
-  tensorGlyph.SetColorModeToScalars()
+  tensorGlyph.SetSourceData( _axes_pd )
+#  tensorGlyph.SetSourceConnection( cubeSource.GetOutputPort() )
+  tensorGlyph.ColorGlyphsOff()
+#  tensorGlyph.SetColorModeToScalars()
   tensorGlyph.ThreeGlyphsOff()
   tensorGlyph.ExtractEigenvaluesOff()
   tensorGlyph.Update()
 
-  mapper= vtk.vtkPolyDataMapper()
+  # tensorGlyph -> actor
+  mapper = vtk.vtkPolyDataMapper()
   try:
     mapper.SetInput(tensorGlyph.GetOutput())
   except:
     mapper.SetInputData(tensorGlyph.GetOutput())
-  actor= vtk.vtkActor()
-  actor.SetMapper(mapper)
+#  mapper.ScalarVisibilityOn()
+#  mapper.SetScalarModeToUseCellData()
+
+  pose_actor = vtk.vtkActor()
+  pose_actor.SetMapper(mapper)
+#  pose_actor.GetProperty().SetColor(255, 0, 0)
+
+  # connect the pose a color line
+  polyLine_cell = vtk.vtkCellArray()
+  polyLine_cell.InsertNextCell(polyLine)
+  polyLine_pd = vtk.vtkPolyData()
+  polyLine_pd.SetPoints(points)
+  polyLine_pd.SetLines(polyLine_cell)
+  lmapper = vtk.vtkPolyDataMapper()
+  try:
+    lmapper.SetInput(polyLine_pd)
+  except:
+    lmapper.SetInputData(polyLine_pd)
+  line_actor = vtk.vtkActor()
+  line_actor.SetMapper(lmapper)
+  line_actor.GetProperty().SetColor(*color)
 
   if not hold:
     viz.RemoveAllActors()
-  viz.AddActor(actor)
+  viz.AddActor(pose_actor)
+  viz.AddActor(line_actor)
+
 
  #%% test
 if __name__ == '__main__':
+  calp_abs[0].Plot(0.2)
 
-  if 1:
+  if 0:
     num_sensor = 2
     num_seg = 1000
     def add_n_noise(sigma):
@@ -528,6 +556,10 @@ if __name__ == '__main__':
       r_all_noisy = deep_map(add_n_noise(noise_on*0.002), r_all)
       t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
       T_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
+      for j in range(num_sensor):
+        T_all_noisy[j][0] = np.eye(4)
+        r_all_noisy[j][0] = np.zeros(3)
+        t_all_noisy[j][0] = np.zeros(3)
 
       print "Abs:"
       calp_abs = CalibrationProblem()
