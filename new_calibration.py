@@ -226,15 +226,19 @@ class AbsTrajectory(Trajectory):
     pose_list = []
 
     for p_base, p_end in zip(self.poses[:-interval],self.poses[interval:]):
-      drdt, J = AbsTrajectory.RelT(p_base.r, p_base.t, p_end.r, p_end.t)
-      J = np.hstack(J)
-      Cov_abs = scipy.linalg.block_diag(p_base.cov_r, p_base.cov_t, p_end.cov_r, p_end.cov_t)
-      cov_drdt = J.dot(Cov_abs).dot(J.T)
+      if np.allclose(p_base.T, p_end.T):
+        pass
 
-      pose = Pose( T = MfromRT(drdt[:3],drdt[3:]),
-                  id = p_end.id,
-                  cov_r= cov_drdt[0:3,0:3],
-                  cov_t= cov_drdt[3:6,3:6] )
+      else:
+        drdt, J = AbsTrajectory.RelT(p_base.r, p_base.t, p_end.r, p_end.t)
+        J = np.hstack(J)
+        Cov_abs = scipy.linalg.block_diag(p_base.cov_r, p_base.cov_t, p_end.cov_r, p_end.cov_t)
+        cov_drdt = J.dot(Cov_abs).dot(J.T)
+
+        pose = Pose( T = MfromRT(drdt[:3],drdt[3:]),
+                    id = p_end.id,
+                    cov_r= cov_drdt[0:3,0:3],
+                    cov_t= cov_drdt[3:6,3:6] )
       pose_list.append(pose)
 
     return RelTrajectory.FromPoseList(pose_list)
@@ -247,6 +251,7 @@ class AbsTrajectory(Trajectory):
       T = invT(self.poses[0].T)
     for p in self.poses:
       p.ApplyTransform(T)
+
 
 class CalibrationProblem(object):
   def __init__(self):
@@ -286,7 +291,7 @@ class CalibrationProblem(object):
   def MakeProblemWithAbsModel(self, base, T0_dict={}):
 
     def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_vs, t_vs):
-#      check_magnitude(r_sa)
+      check_magnitude(r_sa)
       check_magnitude(r_wa)
       check_magnitude(r_vs)
       r_vw, t_vw = r_sa, t_sa
@@ -331,7 +336,7 @@ class CalibrationProblem(object):
   def MakeProblemWithRelModel(self, base, T0_dict={}):
 
     def RelativeConstraint(r_sa, t_sa, dr_a, dt_a, dr_s, dt_s):
-#        check_magnitude(r_sa)
+        check_magnitude(r_sa)
         check_magnitude(dr_a)
         check_magnitude(dr_s)
 
@@ -369,6 +374,13 @@ class CalibrationProblem(object):
                                      Pob.rt_id,
                                      p1.rt_id + p2.rt_id )
     return problem
+
+  def FillCalibration(self):
+    from itertools import permutations
+    for key1,key2 in permutations( self.trajectory.keys(), 2):
+      if key1 in self.calibration and key2 in self.calibration[key1]:
+        pose12 = self.calibration[key1][key2]
+        self.calibration[key2][key1] = Pose( invT(pose12.T) )
 
   def PlotErrHist(self, bins=80):
     num_trj = len(self.trajectory)
@@ -518,9 +530,8 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255
 
  #%% test
 if __name__ == '__main__':
-  calp_abs[0].Plot(0.2)
 
-  if 0:
+  if 1:
     num_sensor = 2
     num_seg = 1000
     def add_n_noise(sigma):
@@ -578,6 +589,7 @@ if __name__ == '__main__':
       x_rel, le_rel, fac_rel = SolveWithGESparse(problem_rel, fac=True)
       fac_rel_list.append(fac_rel)
 
+    calp_abs.FillCalibration()
     calp_abs[0].Plot(0.2)
   #  problem.UpdateXL(True, False)
   #  print r_ob_all,t_ob_all
