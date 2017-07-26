@@ -21,35 +21,41 @@ rtFromT= lambda T: ( Rot2ax(T[:3,:3]), T[:3,3].copy() )
 from collections import  defaultdict, OrderedDict
 from geometry import  SE3
 
+def CovFromRT(cov_r, cov_t):
+  return scipy.linalg.block_diag(cov_r, cov_t)
 
 class Pose(object):
-  __slots__ = 'id','T','r','t','cov_r','cov_t','rt_id','rt_blk'
-  def __init__(self, T, id=None,  cov_r=None, cov_t=None):
+  __slots__ = 'id','T','rt','cov_rt','rt_id','rt_blk'
+  def __init__(self, T, id=None, cov_rt=None):
     self.id = id
-#    self.T = np.copy(T)
-    self.r, self.t = rtFromT(T)
-    self.cov_r, self.cov_t  = cov_r, cov_t
+    self.rt = np.hstack(rtFromT(T))
+    self.cov_rt = cov_rt
+
     self.rt_id, self.rt_blk = None,None
-#    if not np.isfinite(self.r).all():
-#      self.r = np.zeros(3)
     check_magnitude(self.r)
+
+  @property
+  def r(self):
+    return self.rt[:3]
+  @property
+  def t(self):
+    return self.rt[3:]
 
   def __repr__(self):
     return "Pose %s:(%s,%s)" % (self.id, self.r, self.t)
 
   def AddToProblemAsObservation(self, problem):
-    self.rt_id, self.rt_blk = problem.AddObservation([self.r, self.t])
-    if not self.cov_r is None:
-      problem.SetSigmaWithID(self.rt_id[0], self.cov_r)
-    if not self.cov_t is None:
-      problem.SetSigmaWithID(self.rt_id[1], self.cov_t)
+    self.rt_id, self.rt_blk = problem.AddObservation([self.rt])
+    if not self.cov_rt is None:
+      problem.SetSigmaWithID(self.rt_id[0], self.cov_rt)
+
 
   def AddToProblemAsParameter(self, problem):
-    self.rt_id, self.rt_blk = problem.AddParameter([self.r, self.t])
+    self.rt_id, self.rt_blk = problem.AddParameter([self.rt])
 
   def ApplyTransform(self, T):
     T_new = np.dot(T, self.T)
-    self.r[:], self.t[:] = rtFromT(T_new)
+    self.rt[:] = np.hstack(rtFromT(T_new))
 
   @property
   def R(self):
@@ -81,22 +87,20 @@ def test_Interpolate():
 from bisect import bisect_left
 class Trajectory(object):
   @classmethod
-  def FromPoseData(cls, T_list, cov_r_list, cov_t_list, timestamp=None):
+  def FromPoseData(cls, T_list, cov_rt_list, timestamp=None):
     num_pos = len(T_list)
-    if not isinstance(cov_r_list, list):
-      cov_r_list = [cov_r_list]*num_pos
-    if not isinstance(cov_t_list, list):
-      cov_t_list = [cov_t_list]*num_pos
+    if not isinstance(cov_rt_list, list):
+      cov_rt_list = [cov_rt_list]*num_pos
 
     trj = cls()
     if timestamp is None:
-      trj.poses = [Pose(T, id, cov_r, cov_t)        \
-                      for id,(T, cov_r, cov_t)                          \
-                      in  enumerate(zip(T_list, cov_r_list, cov_t_list))]
+      trj.poses = [Pose(T, id, cov_rt)                            \
+                      for id,(T, cov_rt)                          \
+                      in  enumerate(zip(T_list, cov_rt_list))]
     else:
-      trj.poses = [Pose(T, ts, cov_r, cov_t)        \
-                      for ts, T, cov_r, cov_t                          \
-                      in  zip(timestamp, T_list, cov_r_list, cov_t_list)]
+      trj.poses = [Pose(T, ts, cov_rt)                          \
+                      for ts, T, cov_rt                          \
+                      in  zip(timestamp, T_list, cov_rt_list)]
       trj.poses.sort(key=lambda p:p.id)
     return trj
 
@@ -121,16 +125,14 @@ class Trajectory(object):
         p.AddToProblemAsObservation(problem)
 
   def CollectRTError(self):
-    r_err = [p.rt_blk[0].err for p in self.poses if p.rt_blk ]
-    t_err = [p.rt_blk[1].err for p in self.poses if p.rt_blk ]
-    return np.vstack(r_err), np.vstack(t_err)
+    err = np.vstack([p.rt_blk[0].err for p in self.poses if p.rt_blk ])
+    return err[:3], err[3:]
 
   def CollectRTCost(self):
     cost_func = lambda blk: blk.err.dot( np.linalg.inv(blk.sigma) ).dot(blk.err)
 
-    r_cost = [ cost_func(p.rt_blk[0]) for p in self.poses if p.rt_blk ]
-    t_cost = [ cost_func(p.rt_blk[1]) for p in self.poses if p.rt_blk ]
-    return np.hstack(r_cost), np.hstack(t_cost)
+    cost = [ cost_func(p.rt_blk[0]) for p in self.poses if p.rt_blk ]
+    return np.hstack(cost)
 
   @property
   def r(self):
@@ -182,26 +184,24 @@ class RelTrajectory(Trajectory):
 
   def ToAbs(self, T0=np.eye(4) ):
     RelTrajectory.AbsT(*[np.random.rand(3)]*4)
-    pose_list = [Pose( T = T0, id = 0, cov_r= np.zeros(3), cov_t= np.zeros(3) )]
+    pose_list = [Pose( T = T0, id = 0, cov_rt = np.zeros(6) )]
 
     for dp in self.poses:
       p_last = pose_list[-1]
       if np.array_equal(p_last.T, np.eye(4)): # a hack when r,t=0
         pose = Pose( T = dp.T,
                      id = len(pose_list),
-                     cov_r= dp.cov_r,
-                     cov_t= dp.cov_t)
+                     cov_rt= dp.cov_rt)
       else:
         rt, J = RelTrajectory.AbsT(p_last.r, p_last.t, dp.r, dp.t)
 
         J = np.hstack(J)
-        Cov_rel = scipy.linalg.block_diag(p_last.cov_r, p_last.cov_t, dp.cov_r, dp.cov_t)
+        Cov_rel = scipy.linalg.block_diag(p_last.cov_rt, dp.cov_rt)
         cov_rt = J.dot(Cov_rel).dot(J.T)
 
         pose = Pose( T = MfromRT(rt[:3],rt[3:]),
                     id = len(pose_list),
-                    cov_r= cov_rt[0:3,0:3],
-                    cov_t= cov_rt[3:6,3:6] )
+                    cov_rt= cov_rt)
       pose_list.append(pose)
 
     return AbsTrajectory.FromPoseList(pose_list)
@@ -232,13 +232,12 @@ class AbsTrajectory(Trajectory):
       else:
         drdt, J = AbsTrajectory.RelT(p_base.r, p_base.t, p_end.r, p_end.t)
         J = np.hstack(J)
-        Cov_abs = scipy.linalg.block_diag(p_base.cov_r, p_base.cov_t, p_end.cov_r, p_end.cov_t)
+        Cov_abs = scipy.linalg.block_diag(p_base.cov_rt, p_end.cov_rt)
         cov_drdt = J.dot(Cov_abs).dot(J.T)
 
         pose = Pose( T = MfromRT(drdt[:3],drdt[3:]),
                     id = p_end.id,
-                    cov_r= cov_drdt[0:3,0:3],
-                    cov_t= cov_drdt[3:6,3:6] )
+                    cov_rt= cov_drdt)
       pose_list.append(pose)
 
     return RelTrajectory.FromPoseList(pose_list)
@@ -290,7 +289,11 @@ class CalibrationProblem(object):
 
   def MakeProblemWithAbsModel(self, base, T0_dict={}):
 
-    def AbsoluteConstraint(r_sa, t_sa, r_wa, t_wa, r_vs, t_vs):
+    def AbsoluteConstraint(rt_sa, rt_wa, rt_vs):
+      r_sa,t_sa = rt_sa[:3],rt_sa[3:]
+      r_wa,t_wa = rt_wa[:3],rt_wa[3:]
+      r_vs,t_vs = rt_vs[:3],rt_vs[3:]
+
       check_magnitude(r_sa)
       check_magnitude(r_wa)
       check_magnitude(r_vs)
@@ -335,16 +338,19 @@ class CalibrationProblem(object):
 
   def MakeProblemWithRelModel(self, base, T0_dict={}):
 
-    def RelativeConstraint(r_sa, t_sa, dr_a, dt_a, dr_s, dt_s):
-        check_magnitude(r_sa)
-        check_magnitude(dr_a)
-        check_magnitude(dr_s)
+    def RelativeConstraint(rt_sa, drt_a, drt_s):
+      r_sa, t_sa = rt_sa[:3],rt_sa[3:]
+      dr_a, dt_a = drt_a[:3],drt_a[3:]
+      dr_s, dt_s = drt_s[:3],drt_s[3:]
+      check_magnitude(r_sa)
+      check_magnitude(dr_a)
+      check_magnitude(dr_s)
 
-        R_sa = ax2Rot(r_sa)
-        dR_s  = ax2Rot(dr_s)
-        e_t = dt_s + dR_s.dot(t_sa) - R_sa.dot(dt_a) - t_sa
-        e_r = R_sa.dot(dr_a) - dr_s
-        return np.r_[e_r, e_t]
+      R_sa = ax2Rot(r_sa)
+      dR_s  = ax2Rot(dr_s)
+      e_t = dt_s + dR_s.dot(t_sa) - R_sa.dot(dt_a) - t_sa
+      e_r = R_sa.dot(dr_a) - dr_s
+      return np.r_[e_r, e_t]
 
     problem = GaussHelmertProblem()
     """observation"""
@@ -533,7 +539,7 @@ if __name__ == '__main__':
 
   if 1:
     num_sensor = 2
-    num_seg = 1000
+    num_seg = 200
     def add_n_noise(sigma):
       return lambda x: x + sigma*np.random.randn(3)
     def add_u_noise(scale):
@@ -563,7 +569,7 @@ if __name__ == '__main__':
     t_all = deep_map(tFromT, T_all)
 
     fac_abs_list,fac_rel_list = [],[]
-    for test in range(1):
+    for test in range(100):
       r_all_noisy = deep_map(add_n_noise(noise_on*0.002), r_all)
       t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
       T_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
@@ -575,7 +581,7 @@ if __name__ == '__main__':
       print "Abs:"
       calp_abs = CalibrationProblem()
       for i in xrange(num_sensor):
-        calp_abs[i]= AbsTrajectory.FromPoseData( T_all_noisy[i], 0.002**2*np.eye(3), 0.02**2*np.eye(3) )
+        calp_abs[i]= AbsTrajectory.FromPoseData( T_all_noisy[i], scipy.linalg.block_diag(0.002**2*np.eye(3), 0.02**2*np.eye(3)) )
       init_guest = {}#{i+1:Tob for i,Tob in enumerate(Tob_all)}#
       problem_abs = calp_abs.MakeProblemWithAbsModel(0, init_guest)
       x_abs, le_abs, fac_abs = SolveWithGESparse(problem_abs, fac=True)
@@ -584,13 +590,15 @@ if __name__ == '__main__':
       print "Rel:"
       calp_rel = CalibrationProblem()
       for key, trj in calp_abs.trajectory.items():
-        calp_rel[key] = trj.ToRel(5)
+        calp_rel[key] = trj.ToRel(1)
       problem_rel = calp_rel.MakeProblemWithRelModel(0, init_guest)
       x_rel, le_rel, fac_rel = SolveWithGESparse(problem_rel, fac=True)
       fac_rel_list.append(fac_rel)
 
-    calp_abs.FillCalibration()
-    calp_abs[0].Plot(0.2)
+    plt.hist(fac_abs_list)
+    plt.hist(fac_rel_list)
+#    calp_abs.FillCalibration()
+#    calp_abs[0].Plot(0.2)
   #  problem.UpdateXL(True, False)
   #  print r_ob_all,t_ob_all
   #  print calp.param.values()
