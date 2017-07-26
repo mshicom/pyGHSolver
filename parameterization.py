@@ -701,6 +701,133 @@ def test_AngleAxisParameterization_solve():
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   print "test_AngleAxisParameterization_solve passed "
 #%%
+class Quaternion(object):
+  __slots__ = 'q'
+
+  def __init__(self, q):
+    self.q = q
+    if np.sign(q[0]) == -1:
+      print "negative Quaternion"
+
+  @classmethod
+  def FromRot(cls, M):
+    m00,m01,m02 = M[0, 0],M[0, 1],M[0, 2]
+    m10,m11,m12 = M[1, 0],M[1, 1],M[1, 2]
+    m20,m21,m22 = M[2, 0],M[2, 1],M[2, 2]
+    # symmetric matrix K
+    K = np.array([[m00-m11-m22, 0.0,         0.0,         0.0],
+                  [m01+m10,     m11-m00-m22, 0.0,         0.0],
+                  [m02+m20,     m12+m21,     m22-m00-m11, 0.0],
+                  [m21-m12,     m02-m20,     m10-m01,     m00+m11+m22]])
+    K /= 3.0
+    # quaternion is eigenvector of K that corresponds to largest eigenvalue
+    w, V = np.linalg.eigh(K)
+    q = V[[3, 0, 1, 2], np.argmax(w)]
+    q *= np.sign(q[0])
+    return cls(q)
+
+  @classmethod
+  def FromAngleAxis(cls, ax):
+    q = np.zeros(4)
+    theta = np.linalg.norm(ax)
+    if theta == 0.0:
+      q[0] = 1.0
+    else:
+      q[0]  = np.cos(0.5*theta)
+      q[1:] = np.sin(0.5*theta)/theta*ax
+      q *= np.sign(q[0])
+    return cls(q)
+
+  def ToRot(self):
+    q = self.q.copy()
+    n = np.dot(q, q)
+    if n < 1e-12:
+        return np.eye(3)
+    q *= np.sqrt(2.0 / n)
+    q = np.outer(q, q)
+    return np.array([
+        [1.0-q[2, 2]-q[3, 3],     q[1, 2]-q[3, 0],     q[1, 3]+q[2, 0]],
+        [    q[1, 2]+q[3, 0], 1.0-q[1, 1]-q[3, 3],     q[2, 3]-q[1, 0]],
+        [    q[1, 3]-q[2, 0],     q[2, 3]+q[1, 0], 1.0-q[1, 1]-q[2, 2]]])
+
+  def Normalize(self):
+    self.q /= self.Norm()
+    return self
+
+  def Norm(self):
+    return np.linalg.norm(self.q)
+
+  def Inv(self):
+    q = self.q.copy()
+    q[1:] *=-1
+    return Quaternion( q )
+
+  def ToMulMatL(self):
+    r, x, y, z = self.q
+    return np.array([[r, -x, -y, -z],
+                     [x,  r, -z,  y],
+                     [y,  z,  r, -x],
+                     [z, -y,  x,  r]])
+
+  def ToMulMatR(self):
+    r, x, y, z = self.q
+    return np.array([[r, -x, -y, -z],
+                     [x,  r,  z, -y],
+                     [y, -z,  r,  x],
+                     [z,  y, -x,  r]])
+
+  def __mul__(q0, q1):
+    L0 = q0.ToMulMatL()
+    q01 = L0.dot(q1.q)
+    q01 *= np.sign(q01[0])
+    return Quaternion(q01)
+
+  def __getitem__(self, index):
+    return self.q[index]
+
+  def __repr__(self):
+    return "quaternion " + str(self.q)
+
+
+def test_Quaternion():
+  q = Quaternion(np.ones(4))
+  q = Quaternion(np.eye(4)[0])
+  import pycppad
+  q = Quaternion(pycppad.independent( np.arange(4) ))
+
+  # ToRot
+  assert_array_equal(Quaternion(np.r_[1.0, 0,0,0]).ToRot(), np.eye(3) )
+  # FromRot
+  assert_array_equal(Quaternion.FromRot(np.eye(3)).q, np.r_[1.0, 0,0,0] )
+
+  # FromAngleAxis
+  for theta in np.linspace(-np.pi, np.pi,200):
+    v = theta*randsp()
+    p = Quaternion.FromAngleAxis(v)
+    q = Quaternion.FromRot(ax2Rot(v))
+
+    # FromRot = FromAngleAxis
+    assert_almost_equal( p.q, q.q )
+    # norm should always 1
+    assert_almost_equal( p.Norm(), 1.0)
+    assert_almost_equal( q.Norm(), 1.0)
+    # FromRot(ToRot)=self
+    assert_array_almost_equal(Quaternion.FromRot(q.ToRot()).q, q.q)
+
+    assert_almost_equal( (p * p.Inv()).q, np.r_[1.0, 0,0,0] )
+  # mul
+  for _ in range(100):
+    v1,v2 = randsp(),randsp()
+    q1,q2 = Quaternion.FromAngleAxis(v1), Quaternion.FromAngleAxis(v2)
+    q12_true = Quaternion.FromRot( np.dot(ax2Rot(v1), ax2Rot(v2)) ).q
+
+    assert_almost_equal( np.dot(q1.ToMulMatL(), q2.q), q12_true)
+    assert_almost_equal( np.dot(q2.ToMulMatR(), q1.q), q12_true)
+    assert_almost_equal( (q1*q2).q, q12_true)
+
+  print "test_Quaternion passed "
+
+
 def QuaternionProduct(z,w):
   return np.array(
          [z[0] * w[0] - z[1] * w[1] - z[2] * w[2] - z[3] * w[3],
@@ -716,7 +843,7 @@ class QuaternionParameterization(LocalParameterization):
     norm_delta = np.linalg.norm(delta)
     if norm_delta>0:
       sin_delta_by_delta = np.sin(norm_delta) / norm_delta
-      q_delta = np.array([np.cos(norm_delta), sin_delta_by_delta*delta ])
+      q_delta = np.hstack([np.cos(norm_delta), sin_delta_by_delta*delta ])
       return QuaternionProduct(q_delta, x)
     else:
       return x
@@ -733,6 +860,34 @@ class QuaternionParameterization(LocalParameterization):
                       [-x[3],  x[0],  x[1] ],
                       [ x[2], -x[1],  x[0] ] ])
 
+def test_QuaternionParameterization():
+
+  pa = QuaternionParameterization()
+  def iden(x, y):
+    return (Quaternion(x)* Quaternion(y).Inv()).q
+
+  theta = np.random.rand(1)
+  v     = randsp()
+  l = Quaternion.FromAngleAxis( theta*v ).q
+  y_list = [l]
+  x = Quaternion.FromAngleAxis( 0.8*theta*v ).q
+
+  facs = np.empty(1)
+  cov = 0.02**2 * np.eye(3)
+  for it in range(len(facs)):
+    problem = solver2.GaussHelmertProblem()
+    for y in y_list:
+      problem.AddConstraintWithArray(iden, [x], [y])
+      problem.SetParameterization(y, pa)
+      problem.SetSigma(y, cov)
+    problem.SetParameterization(x, pa)
+
+    xs,le,facs[it] = solver2.SolveWithGESparse(problem, maxit=30, fac=True)
+
+  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
+  print "test_AngleAxisParameterization_solve passed "
+
+
 if __name__ == '__main__':
   test_SubsetParameterization()
   test_SE3Parameterization()
@@ -741,6 +896,8 @@ if __name__ == '__main__':
   test_AutoDiffLocalParameterization()
   test_SphereParameterization()
   test_HomogeneousParameterization()
+  test_Quaternion()
+  test_QuaternionParameterization()
   if 0:
     test_SphereParameterization_solve()
     test_HomogeneousParameterization_solve()
