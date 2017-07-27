@@ -1175,7 +1175,7 @@ class GaussHelmertProblem(object):
     inequal_size = [j.shape != (len(tmp_res), size) for j, size in zip(tmp_jac, xl_sizes)]
     if len(tmp_jac) != len(xl_sizes) or np.any( inequal_size ):
       raise RuntimeError("Jacobian Size Not fit")
-    valid_value = [ np.isfinite(m).all() for m in [tmp_res] + tmp_jac ]
+    valid_value = [ np.isfinite(m).all() and not np.all(m==0) for m in [tmp_res] + tmp_jac ]
     if not np.all( valid_value ):
       raise RuntimeError("return value of function Not valid")
     dim_res = len(tmp_res)
