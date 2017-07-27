@@ -123,7 +123,7 @@ def MakeParameterization(plus_func, x0, delta0):
   global_size = len(x0)
   local_size  = len(delta0)
 
-  in_var = pycppad.independent( np.hstack( [x0, np.zeros(local_size)] ) )
+  in_var = pycppad.independent( np.hstack( [x0, delta0] ) )
   x_part, delta_part = np.split(in_var, [global_size])
   out_var = plus_func( x_part, delta_part )
   jac_func = pycppad.adfun(in_var, out_var).jacobian
@@ -792,8 +792,6 @@ class Quaternion(object):
 def test_Quaternion():
   q = Quaternion(np.ones(4))
   q = Quaternion(np.eye(4)[0])
-  import pycppad
-  q = Quaternion(pycppad.independent( np.arange(4) ))
 
   # ToRot
   assert_array_equal(Quaternion(np.r_[1.0, 0,0,0]).ToRot(), np.eye(3) )
@@ -864,28 +862,25 @@ def test_QuaternionParameterization():
 
   pa = QuaternionParameterization()
   def iden(x, y):
-    return (Quaternion(x)* Quaternion(y).Inv()).q
+    return (Quaternion(x)* Quaternion(y).Inv()).q[1:]
+  def iden_jac(x,y):
+    Jx = Quaternion(y).Inv().ToMulMatR()
+    Jy = Quaternion(x).ToMulMatL()
+    return Jx[1:],Jy[1:]
 
   theta = np.random.rand(1)
   v     = randsp()
   l = Quaternion.FromAngleAxis( theta*v ).q
-  y_list = [l]
   x = Quaternion.FromAngleAxis( 0.8*theta*v ).q
 
-  facs = np.empty(1)
-  cov = 0.02**2 * np.eye(3)
-  for it in range(len(facs)):
-    problem = solver2.GaussHelmertProblem()
-    for y in y_list:
-      problem.AddConstraintWithArray(iden, [x], [y])
-      problem.SetParameterization(y, pa)
-      problem.SetSigma(y, cov)
-    problem.SetParameterization(x, pa)
+  problem = solver2.GaussHelmertProblem()
+  problem.AddConstraintWithArray(iden, [x], [l]) #,iden_jac
+  problem.SetParameterization(l, pa)
+  problem.SetParameterization(x, pa)
 
-    xs,le,facs[it] = solver2.SolveWithGESparse(problem, maxit=30, fac=True)
-
-  assert_almost_equal( np.mean(facs), 1.0, decimal=1)
-  print "test_AngleAxisParameterization_solve passed "
+  xs,le,facs = solver2.SolveWithGESparseAsGM(problem, maxit=30, fac=True)
+  assert_array_almost_equal(xs, l)
+  print "test_QuaternionParameterization passed "
 
 
 if __name__ == '__main__':
@@ -897,8 +892,8 @@ if __name__ == '__main__':
   test_SphereParameterization()
   test_HomogeneousParameterization()
   test_Quaternion()
-  test_QuaternionParameterization()
   if 0:
     test_SphereParameterization_solve()
     test_HomogeneousParameterization_solve()
     test_AngleAxisParameterization_solve()
+    test_QuaternionParameterization()
