@@ -8,8 +8,8 @@ Created on Wed Jun  7 14:32:19 2017
 import numpy as np
 import pycppad
 from numpy.testing import *
-
-import solver2
+from util import *
+import solver
 
 from abc import ABCMeta, abstractmethod
 class LocalParameterization(object):
@@ -78,7 +78,50 @@ class IdentityParameterization(LocalParameterization):
   def UpdataJacobian(self, x):
     pass
 
+#%%
+class ProductParameterization(LocalParameterization):
+  def __init__(self, *params):
+    super(ProductParameterization, self).__init__()
+    self.params = params
+    global_sizes = [p.GlobalSize() for p in params]
+    local_sizes  = [p.LocalSize()  for p in params]
 
+    self.global_size = sum(global_sizes)
+    idx = np.cumsum([0] + global_sizes)
+    self.g_slc = [slice(idx[i], idx[i+1]) for i in range(len(params))]
+
+    self.local_size  = sum(local_sizes)
+    idx = np.cumsum([0] + local_sizes)
+    self.l_slc = [slice(idx[i], idx[i+1]) for i in range(len(params))]
+
+  def Plus(self, x, delta):
+    x_new = np.copy(x)
+    for param, g_slc, l_slc in zip(self.params, self.g_slc, self.l_slc):
+      x_new[g_slc] = param.Plus(x[g_slc], delta[l_slc])
+    return x_new
+
+  def ComputeJacobian(self, x):
+    J = [param.ComputeJacobian(x[g_slc]) for param, g_slc in zip(self.params, self.g_slc)]
+    return scipy.linalg.block_diag( *J )
+
+  def GlobalSize(self):
+    return self.global_size
+
+  def LocalSize(self):
+    return self.local_size
+
+def test_ProductParameterization():
+  par = ProductParameterization(IdentityParameterization(2), IdentityParameterization(3))
+  assert(par.GlobalSize() == 5)
+  assert(par.LocalSize()  == 5)
+  x_new = par.Plus(np.arange(5), np.arange(5))
+  assert_array_equal(x_new,
+                     np.arange(5)*2)
+  assert_almost_equal(par.ComputeJacobian(np.arange(5)),
+                     np.eye(5))
+  print "test_ProductParameterization passed "
+
+#%%
 class SubsetParameterization(LocalParameterization):
   def __init__(self, active_parameters_mask):
     super(SubsetParameterization, self).__init__()
@@ -129,7 +172,7 @@ def MakeParameterization(plus_func, x0, delta0):
   jac_func = pycppad.adfun(in_var, out_var).jacobian
   def jac_delta(x):
     inp = np.hstack( [x, np.zeros(local_size) ])
-    J = solver2.check_nan(jac_func(inp))
+    J = check_nan(jac_func(inp))
     return J[:, global_size:]
 
   class AutoDiffLocalParameterization(LocalParameterization):
@@ -250,14 +293,14 @@ def test_SE3Parameterization_solver():
   T0 = geometry.SE3.group_from_algebra(geometry.se3.algebra_from_vector(0.1*np.random.rand(6)))
   l0 = Vec(T0)
   x0 = Vec(np.eye(4))
-  problem = solver2.GaussHelmertProblem()
+  problem = solver.GaussHelmertProblem()
   problem.AddConstraintWithArray(InvR, [x0], [l0])
   problem.SetParameterization(x0, SE3Parameterization())
   problem.SetParameterization(l0, SE3Parameterization())
 
   try:
-    x,le,fac = solver2.SolveWithGESparse(problem,fac=True)
-  except solver2.CholmodNotPositiveDefiniteError:
+    x,le,fac = solver.SolveWithGESparse(problem,fac=True)
+  except solver.CholmodNotPositiveDefiniteError:
     return
 
   print fac
@@ -397,7 +440,7 @@ def test_SphereParameterization():
   # plus 0
   assert_array_almost_equal(x, param.Plus(x, np.r_[0,0,0.]))
 
-  auto_jac = solver2.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
+  auto_jac = solver.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     # always on sphere
     assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
@@ -420,7 +463,7 @@ def test_SphereParameterization_solve():
   xs   = np.empty(facs.shape+(2,))
   for it in range(len(facs)):
     y = [ pa.ToHomoSphere( 1.2 + 0.2*np.random.randn(1) ) for _ in range(200) ]
-    problem = solver2.GaussHelmertProblem()
+    problem = solver.GaussHelmertProblem()
 
     for i in range(len(y)):
       problem.AddConstraintWithArray(iden, [x], [y[i]])
@@ -428,7 +471,7 @@ def test_SphereParameterization_solve():
       problem.SetSigma(y[i], sigma)
     problem.SetParameterization(x, pa )
 
-    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+    xs[it],le,facs[it] = solver.SolveWithGESparse(problem, maxit=20, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs]), 1.2, decimal=1)
@@ -511,7 +554,7 @@ def test_HomogeneousParameterization():
   assert_array_almost_equal( x,
                              param.Plus(x, np.zeros(3) ) )
 
-  auto_jac = solver2.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
+  auto_jac = solver.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     v = 100*np.random.rand(3)
     # always on sphere
@@ -539,14 +582,14 @@ def test_HomogeneousParameterization_solve():
   xs   = np.empty(facs.shape+(3,))
   for it in range(len(facs)):
     y = [ 120 + 2.*np.random.randn(2) for _ in range(200) ]
-    problem = solver2.GaussHelmertProblem()
+    problem = solver.GaussHelmertProblem()
 
     for i in range(len(y)):
       problem.AddConstraintWithArray(iden, [x], [y[i]])
       problem.SetSigma(y[i], sigma)
     problem.SetParameterization(x, pa )
 
-    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+    xs[it],le,facs[it] = solver.SolveWithGESparse(problem, maxit=20, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
@@ -564,14 +607,14 @@ def test_HomogeneousParameterization_solve2():
   xs   = np.empty(facs.shape+(3,))
   for it in range(len(facs)):
     y = [ 120 + 2.*np.random.randn(2) for _ in range(200) ]
-    problem = solver2.GaussHelmertProblem()
+    problem = solver.GaussHelmertProblem()
 
     for i in range(len(y)):
       problem.AddConstraintWithArray(iden, [x], [y[i]])
       problem.SetSigma(y[i], sigma)
     problem.SetParameterization(x, pa )
 
-    xs[it],le,facs[it] = solver2.SolveWithGESparse(problem, maxit=20, fac=True)
+    xs[it],le,facs[it] = solver.SolveWithGESparse(problem, maxit=20, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
@@ -689,14 +732,14 @@ def test_AngleAxisParameterization_solve():
   cov = 0.02**2 * np.eye(3)
   for it in range(len(facs)):
     y_list = [ axAdd(0.02*np.random.randn(3), x) for i in range(100)]
-    problem = solver2.GaussHelmertProblem()
+    problem = solver.GaussHelmertProblem()
     for y in y_list:
       problem.AddConstraintWithArray(iden, [x], [y])
       problem.SetParameterization(y, pa)
       problem.SetSigma(y, cov)
     problem.SetParameterization(x, pa)
 
-    xs,le,facs[it] = solver2.SolveWithGESparse(problem, maxit=30, fac=True)
+    xs,le,facs[it] = solver.SolveWithGESparse(problem, maxit=30, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   print "test_AngleAxisParameterization_solve passed "
@@ -873,17 +916,18 @@ def test_QuaternionParameterization():
   l = Quaternion.FromAngleAxis( theta*v ).q
   x = Quaternion.FromAngleAxis( 0.8*theta*v ).q
 
-  problem = solver2.GaussHelmertProblem()
+  problem = solver.GaussHelmertProblem()
   problem.AddConstraintWithArray(iden, [x], [l]) #,iden_jac
   problem.SetParameterization(l, pa)
   problem.SetParameterization(x, pa)
 
-  xs,le,facs = solver2.SolveWithGESparseAsGM(problem, maxit=30, fac=True)
+  xs,le,facs = solver.SolveWithGESparseAsGM(problem, maxit=30, fac=True)
   assert_array_almost_equal(xs, l)
   print "test_QuaternionParameterization passed "
 
 
 if __name__ == '__main__':
+  test_ProductParameterization()
   test_SubsetParameterization()
   test_SE3Parameterization()
   test_SE3Parameterization_solver()
