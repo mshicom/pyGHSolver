@@ -9,10 +9,8 @@ import numpy as np
 import scipy
 import matplotlib.pyplot as plt
 
-import sys
-sys.path.append('/home/kaihong/workspace/pyGHSolver/')
-from solver2 import *
-
+from solver import *
+from parameterization import *
 
 tFromM = lambda M: M[:3,3].copy()
 rFromM = lambda M: Rot2ax(M[:3,:3])
@@ -32,9 +30,10 @@ class Pose(object):
     self.cov = cov
     self.param_id, self.param_blk = None,None
 
-  @classmethod
-  def FromM(cls, M, *arg,**kwarg):
-    raise NotImplementedError("")
+  @property
+  def R(self):  return self.M[:3,:3]
+  @property
+  def t(self):  return self.M[:3,3]
 
   def __repr__(self):
     return "Pose %s:\n%s" % (self.id, self.M)
@@ -47,24 +46,37 @@ class Pose(object):
   def AddToProblemAsParameter(self, problem):
     self.param_id, self.param_blk = problem.AddParameter([self.param])
 
-  def ApplyTransform(self, M):
+  @classmethod
+  def FromM(cls, M, *arg,**kwarg):
     raise NotImplementedError("")
 
   @property
   def M(self):
     raise NotImplementedError("")
-  @property
-  def R(self):
-    return self.M[:3,:3]
-  @property
-  def t(self):
-    return self.M[:3,3]
+
+  def ApplyTransform(self, M):
+    """used in AbsTrajectory.Rebase"""
+    raise NotImplementedError("")
+
+  @staticmethod
+  def Interpolate(a, b, time):
+    raise NotImplementedError("")
+
+  @staticmethod
+  def Add(a, b):
+    """used in RelTrajectory.ToAbs"""
+    raise NotImplementedError("")
+
+  @staticmethod
+  def Minus(a, b):
+    """used in AbsTrajectory.ToRel"""
+    raise NotImplementedError("")
 
 class MatrixPose(Pose):
   __slots__ = '_M'
   def __init__(self, M, id=None, cov=None):
     super(MatrixPose,self).__init__(id, cov)
-    self._M = M
+    self._M = np.copy(M)
     self.param = np.ndarray(shape=(12,), buffer=self._M)
 
   @classmethod
@@ -86,24 +98,34 @@ class AngleAxisPose(Pose):
     self.param = self.rt
     check_magnitude(self.r)
 
+  @property
+  def r(self):    return self.rt[:3]
+  @property
+  def t(self):    return self.rt[3:]
+
   @classmethod
   def FromM(cls, M, *arg,**kwarg):
     return cls(rFromM(M), tFromM(M), *arg,**kwarg)
-
-  def ApplyTransform(self, M):
-    M_new = np.dot(M, self.M)
-    self.rt[:] = np.hstack(rtFromM(M_new))
 
   @property
   def M(self):
     return MfromRT(self.r, self.t)
 
-  @property
-  def r(self):
-    return self.rt[:3]
-  @property
-  def t(self):
-    return self.rt[3:]
+  def ApplyTransform(self, M):
+    M_new = np.dot(M, self.M)
+    self.rt[:] = np.hstack(rtFromM(M_new))
+
+  @staticmethod
+  def Add(a, b):
+    c_r = axAdd(a.r, b.r)
+    c_t = a.t + ax2Rot(a.r).dot(b.t)
+    return np.hstack([c_r, c_t])
+
+  @staticmethod
+  def Minus(a, b):
+    c_r = axAdd(-a.r, b.r)
+    c_t = ax2Rot(-a.r).dot(b.t - a.t)
+    return np.hstack([c_r, c_t])
 
   def __repr__(self):
     return "AngleAxisPose %s:(%s,%s)" % (self.id, self.r, self.t)
@@ -128,12 +150,17 @@ class AngleAxisPose(Pose):
 
 class QuaternionPose(Pose):
   __slots__ = 'qt'
+  parametriaztion = ProductParameterization(QuaternionParameterization(), IdentityParameterization(3))
   def __init__(self, q, t, id=None, cov=None):
     super(QuaternionPose,self).__init__(id, cov)
     q *= np.sign(q[0])
     q /= np.linalg.norm(q)
     self.qt = np.hstack([q,t])
     self.param = self.qt
+  @property
+  def q(self):    return self.qt[:4]
+  @property
+  def t(self):    return self.qt[4:]
 
   @classmethod
   def FromM(cls, M, *arg,**kwarg):
@@ -143,6 +170,14 @@ class QuaternionPose(Pose):
     M_new = np.dot(M, self.M)
     self.qt[:] = np.hstack([qFromM(M_new), tFromM(M_new)])
 
+  def AddToProblemAsObservation(self, problem):
+    super(QuaternionPose, self).AddToProblemAsObservation(problem)
+    problem.SetParameterizationWithID(self.param_id[0], self.parametriaztion)
+
+  def AddToProblemAsParameter(self, problem):
+    super(QuaternionPose, self).AddToProblemAsParameter(problem)
+    problem.SetParameterizationWithID(self.param_id[0], self.parametriaztion)
+
   @property
   def M(self):
     M = np.eye(4)
@@ -150,20 +185,13 @@ class QuaternionPose(Pose):
     M[:3, 3] = self.t
     return M
 
-  @property
-  def q(self):
-    return self.qt[:4]
-  @property
-  def t(self):
-    return self.qt[4:]
-
   def __repr__(self):
     return "QuaternionPose %s:(%s,%s)" % (self.id, self.q, self.t)
 
 from bisect import bisect_left
 class Trajectory(object):
   @classmethod
-  def FromPoseData(cls, M_list, cov_list, timestamp=None, pose_class=AngleAxisPose):
+  def FromPoseData(cls, M_list, cov_list, timestamp=None, pose_class=QuaternionPose):
     num_pos = len(M_list)
     if not isinstance(cov_list, list):
       cov_list = [cov_list]*num_pos
@@ -211,9 +239,6 @@ class Trajectory(object):
     return np.hstack(cost)
 
   @property
-  def r(self):
-    return [p.r for p in self.poses]
-  @property
   def t(self):
     return [p.t for p in self.poses]
   @property
@@ -234,13 +259,14 @@ class Trajectory(object):
     end = len(self.poses)
     i = 0
     new_p = []
+    PoseType = type(self.poses[0])
     for other in sorted_insertion_timestamp:
       i = bisect_left(sorted_timestep, other, lo=i)  #  a[:i] < x <= a[i:]
       if i == 0:
         continue
       if i == end:
         break
-      p = AngleAxisPose.Interpolate(self.poses[i-1], self.poses[i], other)
+      p = PoseType.Interpolate(self.poses[i-1], self.poses[i], other)
       new_p.append(p)
     return self.FromPoseList(new_p)
 
@@ -251,33 +277,23 @@ class RelTrajectory(Trajectory):
   def __init__(self):
     super(RelTrajectory, self).__init__()
 
-  @staticmethod
-  @AddJacobian
-  def AbsT(r1,t1,dr,dt):
-    r2 = axAdd(r1,dr)
-    t2 = t1 + ax2Rot(r1).dot(dt)
-    return np.hstack([r2, t2])
+  @classmethod
+  def FromPoseData(cls, M_list, cov_list, timestamp=None):
+    return super(RelTrajectory, cls).FromPoseData(M_list, cov_list, timestamp, AngleAxisPose)
 
   def ToAbs(self, M0=np.eye(4) ):
-    RelTrajectory.AbsT(*[np.random.rand(3)]*4)
-    pose_list = [AngleAxisPose( M = M0, id = 0, cov = np.zeros(6) )]
+    PoseClass = type(self.poses[0])
+    pose_list = [PoseClass( M = M0, id = 0, cov = np.zeros(6) )]
 
     for dp in self.poses:
       p_last = pose_list[-1]
       if np.array_equal(p_last.M, np.eye(4)): # a hack when r,t=0
-        pose = AngleAxisPose( M = dp.M,
+        pose = PoseClass( M = dp.M,
                      id = len(pose_list),
                      cov= dp.cov)
       else:
-        rt, J = RelTrajectory.AbsT(p_last.r, p_last.t, dp.r, dp.t)
-
-        J = np.hstack(J)
-        Cov_rel = block_diag(p_last.cov, dp.cov)
-        cov = J.dot(Cov_rel).dot(J.T)
-
-        pose = AngleAxisPose( rt[:3], rt[3:],
-                              id = len(pose_list),
-                              cov= cov)
+        pose = PoseClass.Add(p_last, dp)
+        pose.id = len(pose_list)
       pose_list.append(pose)
 
     return AbsTrajectory.FromPoseList(pose_list)
@@ -286,6 +302,14 @@ class RelTrajectory(Trajectory):
 class AbsTrajectory(Trajectory):
   def __init__(self):
     super(AbsTrajectory, self).__init__()
+
+  @classmethod
+  def FromPoseData(cls, M_list, cov_list, timestamp=None):
+    return super(AbsTrajectory, cls).FromPoseData(M_list, cov_list, timestamp, AngleAxisPose)
+
+  @property
+  def r(self):
+    return [p.r for p in self.poses]
 
   @staticmethod
   @AddJacobian
@@ -493,126 +517,11 @@ class CalibrationProblem(object):
       r_err, t_err = trj.CollectRTError()
       r_sig, t_sig = map(robust_sigma, [r_err, t_err])
 
-#%%
-from vtk_visualizer import plotxyz, get_vtk_control
-import vtk
-from vtk.util import numpy_support
-viz = get_vtk_control()
-viz.RemoveAllActors()
-
-def AxesPolyData():
-   # Create input point data.
-  newPts = vtk.vtkPoints()
-  newLines = vtk.vtkCellArray()
-  newScalars = vtk.vtkUnsignedCharArray()
-  newScalars.SetNumberOfComponents(3)
-  newScalars.SetName("Colors")
-
-  ptIds = [None, None]
-  for i in range(3):
-    ptIds[0] = newPts.InsertNextPoint( [0,0,0] )
-    ptIds[1] = newPts.InsertNextPoint( np.roll([1,0,0], i))
-    newLines.InsertNextCell(2, ptIds)
-
-    c = np.roll([255,0,0], i)
-    newScalars.InsertNextTuple3(*c)
-    newScalars.InsertNextTuple3(*c)
-
-  # Add the lines to the polydata container
-  output = vtk.vtkPolyData()
-  output.SetPoints(newPts)
-  output.GetPointData().SetScalars(newScalars)
-  output.SetLines(newLines)
-  return output
-_axes_pd = AxesPolyData()
-cubeSource = vtk.vtkCubeSource()
-
-def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255)):
-  if inv:
-    pose = map(invT, pose)
-  if not base is None:
-    pose = map(lambda p:np.dot(base,p), pose )
-
-  R_list = [p[:3,:3] for p in pose]
-  t_list = [p[:3,3]  for p in pose]
-
-  # pose matrix -> PolyData
-  points = vtk.vtkPoints()  # where t goes
-  polyLine = vtk.vtkPolyLine()
-  if 1:
-    tensors = vtk.vtkDoubleArray() # where R goes, column major
-    tensors.SetNumberOfComponents(9)
-    for i,(R,t) in enumerate(zip(R_list,t_list)):
-      points.InsertNextPoint(*tuple(t))
-      tensors.InsertNextTupleValue( tuple(R.ravel(order='F')) )
-      polyLine.GetPointIds().InsertNextId(i)
-  else:
-    ts = np.hstack(t_list)
-    Rs_flat = np.hstack([ R.ravel(order='F') for R in R_list])
-    points.SetData(numpy_support.numpy_to_vtk(ts))
-    tensors = numpy_support.numpy_to_vtk( Rs_flat )
-
-  polyData = vtk.vtkPolyData()
-  polyData.SetPoints(points)
-  polyData.GetPointData().SetTensors(tensors)
-
-  # PolyData -> tensorGlyph
-  tensorGlyph= vtk.vtkTensorGlyph()
-  try:
-    tensorGlyph.SetInput(polyData)
-  except:
-    tensorGlyph.SetInputData(polyData)
-  tensorGlyph.SetScaleFactor(scale)
-  tensorGlyph.SetSourceData( _axes_pd )
-#  tensorGlyph.SetSourceConnection( cubeSource.GetOutputPort() )
-  tensorGlyph.ColorGlyphsOff()
-#  tensorGlyph.SetColorModeToScalars()
-  tensorGlyph.ThreeGlyphsOff()
-  tensorGlyph.ExtractEigenvaluesOff()
-  tensorGlyph.Update()
-
-  # tensorGlyph -> actor
-  mapper = vtk.vtkPolyDataMapper()
-  try:
-    mapper.SetInput(tensorGlyph.GetOutput())
-  except:
-    mapper.SetInputData(tensorGlyph.GetOutput())
-#  mapper.ScalarVisibilityOn()
-#  mapper.SetScalarModeToUseCellData()
-
-  pose_actor = vtk.vtkActor()
-  pose_actor.GetProperty().SetLineWidth(1.5)
-  pose_actor.SetMapper(mapper)
-#  pose_actor.GetProperty().SetColor(255, 0, 0)
-
-  # connect the pose a color line
-  polyLine_cell = vtk.vtkCellArray()
-  polyLine_cell.InsertNextCell(polyLine)
-  polyLine_pd = vtk.vtkPolyData()
-  polyLine_pd.SetPoints(points)
-  polyLine_pd.SetLines(polyLine_cell)
-  lmapper = vtk.vtkPolyDataMapper()
-  try:
-    lmapper.SetInput(polyLine_pd)
-  except:
-    lmapper.SetInputData(polyLine_pd)
-  line_actor = vtk.vtkActor()
-  line_actor.SetMapper(lmapper)
-  line_actor.GetProperty().SetColor(*color)
-  line_actor.GetProperty().SetLineStipplePattern(0xf0f0)
-  line_actor.GetProperty().SetLineStippleRepeatFactor(1)
-  line_actor.GetProperty().SetLineWidth(1.5)
-
-  if not hold:
-    viz.RemoveAllActors()
-  viz.AddActor(pose_actor)
-  viz.AddActor(line_actor)
-
 
  #%% test
 if __name__ == '__main__':
 
-  if 0:
+  if 1:
     num_sensor = 2
     num_seg = 200
     def add_n_noise(sigma):
@@ -644,7 +553,7 @@ if __name__ == '__main__':
     t_all = deep_map(tFromM, M_all)
 
     fac_abs_list,fac_rel_list = [],[]
-    for test in range(100):
+    for test in range(1):
       r_all_noisy = deep_map(add_n_noise(noise_on*0.002), r_all)
       t_all_noisy = deep_map(add_n_noise(noise_on*0.02), t_all)
       M_all_noisy = [ map(MfromRT, r_trj, t_trj) for r_trj, t_trj in zip(r_all_noisy, t_all_noisy) ]
