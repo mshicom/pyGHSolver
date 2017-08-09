@@ -78,7 +78,50 @@ class IdentityParameterization(LocalParameterization):
   def UpdataJacobian(self, x):
     pass
 
+#%%
+class ProductParameterization(LocalParameterization):
+  def __init__(self, *params):
+    super(ProductParameterization, self).__init__()
+    self.params = params
+    global_sizes = [p.GlobalSize() for p in params]
+    local_sizes  = [p.LocalSize()  for p in params]
 
+    self.global_size = sum(global_sizes)
+    idx = np.cumsum([0] + global_sizes)
+    self.g_slc = [slice(idx[i], idx[i+1]) for i in range(len(params))]
+
+    self.local_size  = sum(local_sizes)
+    idx = np.cumsum([0] + local_sizes)
+    self.l_slc = [slice(idx[i], idx[i+1]) for i in range(len(params))]
+
+  def Plus(self, x, delta):
+    x_new = np.copy(x)
+    for param, g_slc, l_slc in zip(self.params, self.g_slc, self.l_slc):
+      x_new[g_slc] = param.Plus(x[g_slc], delta[l_slc])
+    return x_new
+
+  def ComputeJacobian(self, x):
+    J = [param.ComputeJacobian(x[g_slc]) for param, g_slc in zip(self.params, self.g_slc)]
+    return scipy.linalg.block_diag( *J )
+
+  def GlobalSize(self):
+    return self.global_size
+
+  def LocalSize(self):
+    return self.local_size
+
+def test_ProductParameterization():
+  par = ProductParameterization(IdentityParameterization(2), IdentityParameterization(3))
+  assert(par.GlobalSize() == 5)
+  assert(par.LocalSize()  == 5)
+  x_new = par.Plus(np.arange(5), np.arange(5))
+  assert_array_equal(x_new,
+                     np.arange(5)*2)
+  assert_almost_equal(par.ComputeJacobian(np.arange(5)),
+                     np.eye(5))
+  print "test_ProductParameterization passed "
+
+#%%
 class SubsetParameterization(LocalParameterization):
   def __init__(self, active_parameters_mask):
     super(SubsetParameterization, self).__init__()
@@ -884,6 +927,7 @@ def test_QuaternionParameterization():
 
 
 if __name__ == '__main__':
+  test_ProductParameterization()
   test_SubsetParameterization()
   test_SE3Parameterization()
   test_SE3Parameterization_solver()
