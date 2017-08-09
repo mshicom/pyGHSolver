@@ -426,33 +426,28 @@ viz.RemoveAllActors()
 
 def AxesPolyData():
    # Create input point data.
-  lpts = vtk.vtkPoints()
-  lpts.InsertPoint(0, (0,0,0))
-  lpts.InsertPoint(1, (1,0,0))
-  lpts.InsertPoint(2, (0,1,0))
-  lpts.InsertPoint(3, (0,0,1))
+  newPts = vtk.vtkPoints()
+  newLines = vtk.vtkCellArray()
+  newScalars = vtk.vtkUnsignedCharArray()
+  newScalars.SetNumberOfComponents(3)
+  newScalars.SetName("Colors")
 
-  lines = vtk.vtkCellArray()
-  for i in xrange(1,4):
-    l = vtk.vtkLine()
-    l.GetPointIds().SetId(0, 0)
-    l.GetPointIds().SetId(1, i)
-    lines.InsertNextCell(l)
+  ptIds = [None, None]
+  for i in range(3):
+    ptIds[0] = newPts.InsertNextPoint( [0,0,0] )
+    ptIds[1] = newPts.InsertNextPoint( np.roll([1,0,0], i))
+    newLines.InsertNextCell(2, ptIds)
 
-  # Create a vtkUnsignedCharArray container and store the colors in it
-  colors = vtk.vtkUnsignedCharArray()
-  colors.SetNumberOfComponents(3)
-  colors.SetName("Colors")
-  colors.InsertNextTuple3(255,0,0)
-  colors.InsertNextTuple3(0,255,0)
-  colors.InsertNextTuple3(0,0,255)
+    c = np.roll([255,0,0], i)
+    newScalars.InsertNextTuple3(*c)
+    newScalars.InsertNextTuple3(*c)
 
   # Add the lines to the polydata container
-  linesPolyData = vtk.vtkPolyData()
-  linesPolyData.SetPoints(lpts)
-  linesPolyData.SetLines(lines)
-  linesPolyData.GetCellData().SetScalars(colors)
-  return linesPolyData
+  output = vtk.vtkPolyData()
+  output.SetPoints(newPts)
+  output.GetPointData().SetScalars(newScalars)
+  output.SetLines(newLines)
+  return output
 _axes_pd = AxesPolyData()
 cubeSource = vtk.vtkCubeSource()
 
@@ -510,6 +505,7 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255
 #  mapper.SetScalarModeToUseCellData()
 
   pose_actor = vtk.vtkActor()
+  pose_actor.GetProperty().SetLineWidth(1.5)
   pose_actor.SetMapper(mapper)
 #  pose_actor.GetProperty().SetColor(255, 0, 0)
 
@@ -527,6 +523,9 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255
   line_actor = vtk.vtkActor()
   line_actor.SetMapper(lmapper)
   line_actor.GetProperty().SetColor(*color)
+  line_actor.GetProperty().SetLineStipplePattern(0xf0f0)
+  line_actor.GetProperty().SetLineStippleRepeatFactor(1)
+  line_actor.GetProperty().SetLineWidth(1.5)
 
   if not hold:
     viz.RemoveAllActors()
