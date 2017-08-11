@@ -9,36 +9,31 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 from util import *
-import solver
 
-from abc import ABCMeta, abstractmethod
 class LocalParameterization(object):
-  __metaclass__ = ABCMeta
-
   def __init__(self):
     self.jacobian = None
 
-  @abstractmethod
   def GlobalSize(self):
     """ Size of x """
+    raise NotImplementedError()
 
-  @abstractmethod
   def LocalSize(self):
     """ Size of delta """
+    raise NotImplementedError()
 
-  @abstractmethod
   def Plus(self, x, delta):
     """ Generalization of the addition operation.
-
     x_plus_delta = Plus(x, delta)
     with the condition that Plus(x, 0) = x.
     """
+    raise NotImplementedError()
 
-  @abstractmethod
   def ComputeJacobian(self, x):
     """ Return the GlobalSize() x LocalSize() row-major jacobian matrix.
         The jacobian of Plus(x, delta) w.r.t delta at delta = 0.
     """
+    raise NotImplementedError()
 
   def UpdataJacobian(self, x):
     self.jacobian = self.ComputeJacobian(x).copy()
@@ -927,6 +922,8 @@ def test_QuaternionParameterization():
 
 
 if __name__ == '__main__':
+  import solver
+
   test_ProductParameterization()
   test_SubsetParameterization()
   test_SE3Parameterization()

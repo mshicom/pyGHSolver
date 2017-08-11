@@ -16,9 +16,9 @@ np.set_printoptions(precision=3, linewidth=90)
 from numpy.testing import *
 import pycppad
 
-from parameterization import *
-from matrix_tree import *
-from util import *
+from .parameterization import LocalParameterization,IdentityParameterization
+from .matrix_tree import *
+from .util import *
 from collections import namedtuple
 
 #%% CompoundVector
@@ -1090,7 +1090,7 @@ class BatchGaussHelmertProblem(object):
       param = IdentityParameterization(dim_arg)
     else:
       assert isinstance(param, LocalParameterization)
-      check_equal(dim_arg, param_x.GlobalSize())
+      check_equal(dim_arg, param.GlobalSize())
 
     self.parameters[slot] = array
     self.param_x[slot] = param
@@ -1235,7 +1235,7 @@ class BatchGaussHelmertProblem(object):
           break
     sigma_0 = np.sum([vv[i].dot(inv(Cov_ll[i])).dot(vv[i]) for i in xrange(num_obs)]) / (num_obs*dim_err - self.dim_x)
     Cov_xx  = np.linalg.pinv(Nm)
-    return self.x_args(), Cov_xx, vv, sigma_0
+    return self.x_args(), Cov_xx, sigma_0, vv, w
 
 #%%
 if __name__ == '__main__':
@@ -1295,7 +1295,6 @@ if __name__ == '__main__':
     plt.hist(fac)
     np.mean(fac)
     np.mean(x,axis=0)
-
 
 
   def g(x0, x1, l0, l1, l2):

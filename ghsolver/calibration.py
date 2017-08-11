@@ -9,8 +9,8 @@ import numpy as np
 import scipy
 import matplotlib.pyplot as plt
 
-from solver import *
-from parameterization import *
+from .solver import *
+from .parameterization import *
 
 tFromM = lambda M: M[:3,3].copy()
 rFromM = lambda M: Rot2ax(M[:3,:3])
