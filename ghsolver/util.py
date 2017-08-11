@@ -9,6 +9,11 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 
+def check_equal(x,y):
+  if not x==y:
+    raise ValueError("value not equal")
+  return x
+
 def check_nan(x):
   if not np.all( np.isfinite(x) ):
     raise ValueError("invalid value")

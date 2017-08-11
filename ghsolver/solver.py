@@ -1059,6 +1059,183 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 #
 #  return ret
 
+#%%
+def huber_w(y):
+    return np.fmin(1, 1/np.abs(y))
+
+def huber_w_smooth(y):
+    return 1/np.sqrt(1 + y**2)
+
+def exp_w(c=2):
+    def _exp_w(y):
+        return np.exp(-0.5*y**2/c**2)
+    return _exp_w
+
+class BatchGaussHelmertProblem(object):
+  def __init__(self, g, num_x_arg, num_l_arg):
+    self.g = g
+    # prelocated space
+    self.param_x = [None]*num_x_arg
+    self.param_l = [None]*num_l_arg
+    self.parameters   = [None]*num_x_arg
+    self.observations = [[] for _ in xrange(num_l_arg)]
+    self.covariances  = [[] for _ in xrange(num_l_arg)]
+
+    self.num_l_arg = num_l_arg
+    self.num_x_arg = num_x_arg
+
+  def SetParameter(self, slot, array, param=None):
+    dim_arg = len(array)
+    if param is None:
+      param = IdentityParameterization(dim_arg)
+    else:
+      assert isinstance(param, LocalParameterization)
+      check_equal(dim_arg, param_x.GlobalSize())
+
+    self.parameters[slot] = array
+    self.param_x[slot] = param
+
+  def AddObservation(self, slot, array, cov=None):
+    obs_group = self.observations[slot]
+    if len(obs_group)>0:
+      check_equal(len(array), len(obs_group[0]))
+    obs_group.append(array)
+    self.covariances[slot].append(cov)
+
+  def SetObservationParameterization(self, slot, param):
+    assert isinstance(param, LocalParameterization)
+    self.param_l[slot] = param
+
+  def x_args(self):
+    return self.parameters
+
+  def l_args(self):
+    for j in range(len(self.observations[0])):
+      yield [ obs_group[j] for obs_group in self.observations]
+
+  def Setup(self):
+    num_x_arg = self.num_x_arg
+    num_l_arg = self.num_l_arg
+    if None in self.parameters:
+      raise RuntimeError("some parameter not set, use SetParameter\n %s" % self.parameters)
+
+    num_obs = [len(obs_group) for obs_group in self.observations ]
+    if len(set(num_obs)) != 1:
+      raise RuntimeError("not equal number of observations\n %s" % num_obs)
+    self.num_obs = num_obs[0]
+
+    # parameterization x
+    self.slice_x = [ None ]*num_x_arg
+    self.slice_dx= [ None ]*num_x_arg
+    dim_x, dim_dx = 0,0
+    for i in range(num_x_arg):
+      dim_arg = len(self.parameters[i])
+      self.slice_x[i] = slice( dim_x, dim_x + dim_arg)
+      dim_x += dim_arg
+      self.slice_dx[i] = slice(dim_dx, dim_dx + self.param_x[i].LocalSize())
+      dim_dx += self.param_x[i].LocalSize()
+    self.dim_dx = dim_dx
+    self.dim_x  = dim_x
+
+    # parameterization l
+    self.slice_l = [ None ]*num_l_arg
+    self.slice_dl= [ None ]*num_l_arg
+    dim_l, dim_dl = 0,0
+    for i in range(num_l_arg):
+      dim_arg = len(self.observations[i][0])
+      if self.param_l[i] is None:
+        self.param_l[i] = IdentityParameterization( dim_arg  )
+      else:
+        check_equal(dim_arg, self.param_l[i].GlobalSize())
+      self.slice_l[i] = slice(dim_l, dim_l+dim_arg)
+      dim_l += dim_arg
+      self.slice_dl[i] = slice(dim_dl, dim_dl+self.param_l[i].LocalSize())
+      dim_dl += self.param_l[i].LocalSize()
+    self.dim_dl = dim_dl
+    self.dim_l  = dim_l
+
+    # covariance
+    for i in range(num_l_arg):
+      cov_list = self.covariances[i]
+      dim_delta = self.param_l[i].LocalSize()
+      default_cov = np.eye(dim_delta)
+      for j in range(self.num_obs):
+        if cov_list[j] is None:
+          cov_list[j] = default_cov
+
+    # dim_err
+    err, A, B = self.g( * self.x_args()+next(self.l_args()) )
+    self.dim_err = len(err)
+    check_equal(A.shape, (self.dim_err, self.dim_x))
+    check_equal(B.shape, (self.dim_err, self.dim_l))
+
+
+  def Solve(self, maxiter=100, Tx=1e-8, f_w=huber_w):
+    self.Setup()
+    dim_err = self.dim_err
+    num_obs = self.num_obs
+
+    Am   = np.empty( (num_obs,) + (dim_err, self.dim_dx) )
+    Bm   = np.empty( (num_obs,) + (dim_err, self.dim_dl) )
+    W_gg = np.empty( (num_obs,) + (dim_err,  dim_err) )
+    Nm   = np.empty( (self.dim_dx, self.dim_dx)    )
+    nv   = np.empty( self.dim_dx )
+    Cg   = np.empty( (num_obs, dim_err)  )
+    X_gg = np.empty( num_obs )
+    vv   = np.zeros( (num_obs, self.dim_dl) )   # observatin correction
+
+    Cov_ll=np.zeros( (num_obs,) + (self.dim_dl, self.dim_dl) )
+    for i in range(num_obs):
+      for j, seg in enumerate(self.slice_dl):
+        Cov_ll[i, seg, seg ] = self.covariances[j][i]
+
+    for it in xrange(maxiter):
+      Nm[:,:] = 0
+      nv[:] = 0
+      x_arg = self.x_args()
+      for i, l_arg in enumerate(self.l_args()):
+        # update Jacobian and residual
+        err, A, B = self.g(*x_arg+l_arg)
+        # append parameterization Jacobian
+        Am[i] = np.hstack( param.ToLocalJacobian(A[:,seg]) for param, seg in zip(self.param_x, self.slice_x) )
+        Bm[i] = np.hstack( param.ToLocalJacobian(B[:,seg]) for param, seg in zip(self.param_l, self.slice_l) )
+        # residual
+        Cg[i] = Bm[i].dot(vv[i]) - err
+
+        # weights of constraints
+        W_gg[i] = inv( Bm[i].dot(Cov_ll[i]).dot(Bm[i].T) ) #
+        # test statistic
+        X_gg[i] = np.sqrt( Cg[i].T.dot(W_gg[i]).dot(Cg[i]) )
+
+      # robust weight function
+      sigma_gg = np.median(X_gg)/0.6745
+      w = f_w( X_gg/sigma_gg )
+
+      # normal equation
+      for i in xrange(num_obs):
+        ATBWB = Am[i].T.dot(w[i]*W_gg[i])
+        Nm  += ATBWB.dot(Am[i])
+        nv  += ATBWB.dot(Cg[i])
+
+      # solve dx and update
+      dx = np.linalg.solve(Nm, nv)
+      for x, param, seg_dx in zip(x_arg, self.param_x, self.slice_dx):
+        x[:] = param.Plus(x, dx[seg_dx])
+
+      # solve dl and update
+      for i, l_arg in enumerate(self.l_args()):
+        lamba = W_gg[i].dot( Am[i].dot(dx) - Cg[i] )
+        dl    = -Cov_ll[i].dot( Bm[i].T.dot(lamba) ) - vv[i]
+
+        for l, param, seg_dl in zip(l_arg, self.param_l, self.slice_dl):
+          l[:] = param.Plus(l, dl[seg_dl])
+          vv[i][seg_dl] += dl[seg_dl] # calculate observation-corrections
+
+      if np.abs(dx).max() < Tx:
+          break
+    sigma_0 = np.sum([vv[i].dot(inv(Cov_ll[i])).dot(vv[i]) for i in xrange(num_obs)]) / (num_obs*dim_err - self.dim_x)
+    Cov_xx  = np.linalg.pinv(Nm)
+    return self.x_args(), Cov_xx, vv, sigma_0
 
 #%%
 if __name__ == '__main__':
@@ -1121,9 +1298,24 @@ if __name__ == '__main__':
 
 
 
+  def g(x0, x1, l0, l1, l2):
+    e0 =     x0 - l0
+    e1 = 0.5*x1 - l1
+    e2 = 0.2*x1 - l2
+    Jx = np.vstack( [ np.c_[ np.eye(3),       np.zeros((3,3))],
+                      np.c_[ np.zeros((3,3)), 0.2*np.eye(3)],
+                      np.c_[ np.zeros((3,3)), 0.5*np.eye(3)],])
+    Jl = -np.eye(9)
+    return np.hstack([e0,e1,e2]), Jx, Jl
 
+  problem = BatchGaussHelmertProblem(g,2,3)
+  x0 = np.ones(3)
+  x1 = 2*np.ones(3)
 
-
-
-
-
+  problem.SetParameter(0, x0)
+  problem.SetParameter(1, x1)
+  for i in range(2):
+    problem.AddObservation(0, np.random.rand(3))
+    problem.AddObservation(1, np.random.rand(3))
+    problem.AddObservation(2, np.random.rand(3))
+  print problem.Solve()
