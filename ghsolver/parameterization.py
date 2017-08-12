@@ -35,8 +35,8 @@ class LocalParameterization(object):
     """
     raise NotImplementedError()
 
-  def UpdataJacobian(self, x):
-    self.jacobian = self.ComputeJacobian(x).copy()
+  def UpdateJacobian(self, x):
+    self.jacobian = self.ComputeJacobian(x)
 
   def ToLocalJacobian(self, Jx):
     """ Return J_delta given J_x.
@@ -52,6 +52,7 @@ class LocalParameterization(object):
 
 class IdentityParameterization(LocalParameterization):
   def __init__(self, size):
+    super(IdentityParameterization, self).__init__()
     self.size = size
     self.jacobian = np.eye(self.size)
 
@@ -70,8 +71,16 @@ class IdentityParameterization(LocalParameterization):
   def ToLocalJacobian(self, Jx):
     return Jx
 
-  def UpdataJacobian(self, x):
+  def UpdateJacobian(self, x):
     pass
+
+def replace_none_or_check_param(param, dim):
+  if param is None:
+    param = IdentityParameterization(dim)
+  else:
+    assert isinstance(param, LocalParameterization)
+    check_equal(dim, param.GlobalSize())
+  return param
 
 #%%
 class ProductParameterization(LocalParameterization):
@@ -136,7 +145,7 @@ class SubsetParameterization(LocalParameterization):
   def ComputeJacobian(self, x):
     return self.jacobian
 
-  def UpdataJacobian(self, x):
+  def UpdateJacobian(self, x):
     pass
 
   def ToLocalJacobian(self, Jx):

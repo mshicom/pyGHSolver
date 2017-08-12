@@ -9,9 +9,14 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 
+def check_identity(x):
+  if len(set(x)) != 1:
+    raise ValueError("values not identical")
+  return x
+
 def check_equal(x,y):
   if not x==y:
-    raise ValueError("value not equal")
+    raise ValueError("values not equal")
   return x
 
 def check_nan(x):
@@ -28,6 +33,10 @@ def check_magnitude(r):
   if np.linalg.norm(r) > np.pi:
     raise ValueError("rotation magnitude larger than pi, will cause problems during optimizatoin")
   return r
+
+def MakeSequenceSlice(size_list):
+  offsets = np.cumsum( [0] + list(size_list) )
+  return [slice(offsets[i], offsets[i+1]) for i in xrange(len(size_list))]
 
 def MakeJacobianFunction(g, *args):
   arg_sizes= [ len(np.atleast_1d(vec)) for vec in args ]

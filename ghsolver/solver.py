@@ -16,9 +16,9 @@ np.set_printoptions(precision=3, linewidth=90)
 from numpy.testing import *
 import pycppad
 
-from .parameterization import LocalParameterization,IdentityParameterization
-from .matrix_tree import *
-from .util import *
+from parameterization import *
+from matrix_tree import *
+from util import *
 from collections import namedtuple
 
 #%% CompoundVector
@@ -527,12 +527,12 @@ class GaussHelmertProblem(object):
     for x in self.dict_parameter_block.values(): #array, dim, isfixed, param
       if x.isfixed or x.param is None:
         continue  # ignore fixed
-      x.param.UpdataJacobian(x.array)
+      x.param.UpdateJacobian(x.array)
 
     for l in self.dict_observation_block.values(): #array, dim, isfixed, param
       if l.isfixed or l.param is None:
         continue  # ignore fixed
-      l.param.UpdataJacobian(l.array)
+      l.param.UpdateJacobian(l.array)
 
     for cb in self.constraint_blocks:
       cb.g_jac()
@@ -926,6 +926,28 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
     ret.append( covariance )
   return ret
 
+def test_SolveWithGESparseAsGM():
+  dim_x = 3
+  a = np.ones(dim_x)
+
+  num_l = 100
+  sigma = 0.02
+  s = sigma**2*np.eye(dim_x)
+  x = np.empty((1000, 3))
+  fac = np.empty(1000)
+  for trail in range(1000):
+    bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
+    problem = GaussHelmertProblem()
+    for i in range(num_l):
+      problem.AddConstraintWithArray(lambda x,y:x-y,
+                                   [ a ],
+                                   [ bs[i] ])
+      problem.SetSigma(bs[i], s)
+    x[trail],_, fac[trail] = SolveWithGESparseAsGM(problem,fac=True)
+  plt.hist(fac)
+  np.mean(fac)
+  np.mean(x,axis=0)
+
 def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   problem.SetUp()
   res  = problem.CompoundResidual()
@@ -1005,6 +1027,8 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
       covariance *= factor
     ret.append( covariance )
   return ret
+
+
 #from pykrylov.symmlq import Symmlq
 #from symmlq import symmlq
 #from cvxopt import blas
@@ -1071,250 +1095,292 @@ def exp_w(c=2):
         return np.exp(-0.5*y**2/c**2)
     return _exp_w
 
+from collections import  namedtuple
+from itertools import izip, count
 class BatchGaussHelmertProblem(object):
+  class Observation(object):
+    __slots__ = "array","param","cov","err"
+    def __init__(self, array, param=None, cov=None):
+      # check
+      dim = len(array)
+      param = replace_none_or_check_param(param, dim)
+      dim_delta = param.LocalSize()
+      if cov is None:
+        cov = np.eye(dim_delta)
+      else:
+        cov_shape = np.shape(cov)
+        assert len(set(cov_shape))==1 and len(cov_shape)==2 # diagonal
+        assert cov_shape[0] == dim_delta                    # dim
+      # set
+      self.array = array
+      self.param = param
+      self.cov = cov
+      self.err = np.zeros(dim_delta)
+
+    def UpdatePrmJacobian(self):
+      self.param.UpdateJacobian(self.array)
+
+    def Plus(self, delta):
+      self.array[:] = self.param.Plus(self.array, delta)
+      self.err += delta
+
+    def Cost(self):
+      W = np.linalg.inv( self.cov )
+      return self.err.dot( W ).dot(self.err)
+
+    @property
+    def dim(self): return len(self.array)
+    @property
+    def dim_delta(self): return self.param.LocalSize()
+
+  class ObservationGroup(object):
+    def __init__(self):
+      self.elements = []
+
+    def Add(self, obs):
+      # check
+      assert isinstance(obs, BatchGaussHelmertProblem.Observation)
+      if self.size > 0:
+        assert obs.dim == self.dim
+        assert type(obs.param) == type(self[0].param)
+      # set
+      obs_id = self.size
+      self.elements.append(obs)
+      return obs_id
+
+    def UpdatePrmJacobian(self):
+      for e in self.elements:
+        e.UpdatePrmJacobian()
+
+    def Cost(self):
+      return sum( e.Cost() for e in self.elements  )
+
+    def arrays(self):
+      return [e.array for e in self.elements]
+    def params(self):
+      return [e.param for e in self.elements]
+    def covs(self):
+      return [e.cov for e in self.elements]
+    def errs(self):
+      return [e.err for e in self.elements]
+
+    def __getitem__(self, key):
+      return self.elements[key]
+    @property
+    def size(self):  return len(self.elements)
+    @property
+    def dim(self):   return self[0].dim if self.size > 0 else -1
+    @property
+    def dim_delta(self):   return self[0].dim_delta if self.size > 0 else -1
+    def __repr__(self):
+      return  str(self.arrays())
+
+
+  #------------------------BatchGaussHelmertProblem----------------------------
   def __init__(self, g, num_x_arg, num_l_arg):
     self.g = g
     # prelocated space
-    self.param_x = [None]*num_x_arg
-    self.param_l = [None]*num_l_arg
-    self.parameters   = [None]*num_x_arg
-    self.observations = [[] for _ in xrange(num_l_arg)]
-    self.covariances  = [[] for _ in xrange(num_l_arg)]
+    self.x        = [None]*num_x_arg
+    self.x_params = [None]*num_x_arg
+    self.l_groups = [ BatchGaussHelmertProblem.ObservationGroup() for _ in xrange(num_l_arg)]
 
     self.num_l_arg = num_l_arg
     self.num_x_arg = num_x_arg
 
+  def x_arrays(self):
+    return tuple(self.x)
+  def l_arrays(self):
+    return izip(* (group.arrays() for group in self.l_groups) )
+  def l_params(self):
+    return izip(* (group.params() for group in self.l_groups) )
+  def l_covs(self):
+    return izip(* (group.covs() for group in self.l_groups) )
+  def l_errs(self):
+    return izip(* (group.errs() for group in self.l_groups) )
+
   def SetParameter(self, slot, array, param=None):
+    # check
     dim_arg = len(array)
-    if param is None:
-      param = IdentityParameterization(dim_arg)
-    else:
-      assert isinstance(param, LocalParameterization)
-      check_equal(dim_arg, param.GlobalSize())
+    param = replace_none_or_check_param(param, dim_arg)
+    # set
+    self.x[slot] = array
+    self.x_params[slot] = param
 
-    self.parameters[slot] = array
-    self.param_x[slot] = param
+  def AddObservation(self, slot, array, cov=None, param=None):
+    new_observation = BatchGaussHelmertProblem.Observation( array, param, cov)
+    obs_id = self.l_groups[slot].Add( new_observation )
+    return obs_id, new_observation.err
 
-  def AddObservation(self, slot, array, cov=None):
-    obs_group = self.observations[slot]
-    if len(obs_group)>0:
-      check_equal(len(array), len(obs_group[0]))
-    obs_group.append(array)
-    self.covariances[slot].append(cov)
-
-  def SetObservationParameterization(self, slot, param):
-    assert isinstance(param, LocalParameterization)
-    self.param_l[slot] = param
-
-  def x_args(self):
-    return self.parameters
-
-  def l_args(self):
-    for j in range(len(self.observations[0])):
-      yield [ obs_group[j] for obs_group in self.observations]
 
   def Setup(self):
-    num_x_arg = self.num_x_arg
-    num_l_arg = self.num_l_arg
-    if None in self.parameters:
-      raise RuntimeError("some parameter not set, use SetParameter\n %s" % self.parameters)
+    for arr in self.x:
+      if arr is None:
+        raise RuntimeError("some parameter not set, use SetParameter\n %s" % self.parameters)
 
-    num_obs = [len(obs_group) for obs_group in self.observations ]
-    if len(set(num_obs)) != 1:
-      raise RuntimeError("not equal number of observations\n %s" % num_obs)
-    self.num_obs = num_obs[0]
+    group_sizes = [group.size for group in self.l_groups ]
+    if len(set(group_sizes)) != 1 or group_sizes[0] == 0:
+      raise RuntimeError("number of observationsnot equal \n %s" % num_obs)
+    self.num_obs = group_sizes[0]
 
     # parameterization x
-    self.slice_x = [ None ]*num_x_arg
-    self.slice_dx= [ None ]*num_x_arg
-    dim_x, dim_dx = 0,0
-    for i in range(num_x_arg):
-      dim_arg = len(self.parameters[i])
-      self.slice_x[i] = slice( dim_x, dim_x + dim_arg)
-      dim_x += dim_arg
-      self.slice_dx[i] = slice(dim_dx, dim_dx + self.param_x[i].LocalSize())
-      dim_dx += self.param_x[i].LocalSize()
-    self.dim_dx = dim_dx
-    self.dim_x  = dim_x
+    size_list_x  = [len(arr) for arr in self.x]
+    self.dim_x   = sum(size_list_x)
+    self.slice_x = MakeSequenceSlice(size_list_x)
+
+    size_list_dx = [prm.LocalSize() for prm in self.x_params]
+    self.dim_dx  = sum(size_list_dx)
+    self.slice_dx= MakeSequenceSlice(size_list_dx)
 
     # parameterization l
-    self.slice_l = [ None ]*num_l_arg
-    self.slice_dl= [ None ]*num_l_arg
-    dim_l, dim_dl = 0,0
-    for i in range(num_l_arg):
-      dim_arg = len(self.observations[i][0])
-      if self.param_l[i] is None:
-        self.param_l[i] = IdentityParameterization( dim_arg  )
-      else:
-        check_equal(dim_arg, self.param_l[i].GlobalSize())
-      self.slice_l[i] = slice(dim_l, dim_l+dim_arg)
-      dim_l += dim_arg
-      self.slice_dl[i] = slice(dim_dl, dim_dl+self.param_l[i].LocalSize())
-      dim_dl += self.param_l[i].LocalSize()
-    self.dim_dl = dim_dl
-    self.dim_l  = dim_l
+    size_list_l  = [grp.dim for grp in self.l_groups]
+    self.dim_l   = sum(size_list_l)
+    self.slice_l = MakeSequenceSlice(size_list_l)
 
-    # covariance
-    for i in range(num_l_arg):
-      cov_list = self.covariances[i]
-      dim_delta = self.param_l[i].LocalSize()
-      default_cov = np.eye(dim_delta)
-      for j in range(self.num_obs):
-        if cov_list[j] is None:
-          cov_list[j] = default_cov
+    size_list_dl = [grp.dim_delta for grp in self.l_groups]
+    self.dim_dl  = sum(size_list_dl)
+    self.slice_dl= MakeSequenceSlice(size_list_dl)
 
     # dim_err
-    err, A, B = self.g( * self.x_args()+next(self.l_args()) )
+    err, A, B = self.g( * self.x_arrays() + next(self.l_arrays()) )
     self.dim_err = len(err)
     check_equal(A.shape, (self.dim_err, self.dim_x))
     check_equal(B.shape, (self.dim_err, self.dim_l))
 
 
-  def Solve(self, maxiter=100, Tx=1e-8, f_w=huber_w):
+  def _UpdateAllPrmJacobian(self):
+    for x, param in izip(self.x, self.x_params):
+      param.UpdateJacobian(x)
+    for grp in self.l_groups:
+      grp.UpdatePrmJacobian()
+
+  def _Plus_dx(self, dx):
+    for x, param, seg_dx in zip(self.x, self.x_params, self.slice_dx):
+        x[:] = param.Plus(x, dx[seg_dx])
+
+  def _Plus_dl(self, obs_id, dl):
+    for grp, seg_dl in zip(self.l_groups, self.slice_dl):
+      grp[obs_id].Plus(dl[seg_dl])
+
+
+  def Solve(self, maxiter=100, Tx=1e-6, f_w=huber_w):
+    # 1. setup
     self.Setup()
-    dim_err = self.dim_err
     num_obs = self.num_obs
 
-    Am   = np.empty( (num_obs,) + (dim_err, self.dim_dx) )
-    Bm   = np.empty( (num_obs,) + (dim_err, self.dim_dl) )
-    W_gg = np.empty( (num_obs,) + (dim_err,  dim_err) )
+    # 2.allocate space
+    Am   = np.empty( (num_obs,) + (self.dim_err, self.dim_dx) )
+    Bm   = np.empty( (num_obs,) + (self.dim_err, self.dim_dl) )
+    W_gg = np.empty( (num_obs,) + (self.dim_err, self.dim_err) )
     Nm   = np.empty( (self.dim_dx, self.dim_dx)    )
     nv   = np.empty( self.dim_dx )
-    Cg   = np.empty( (num_obs, dim_err)  )
+    Cg   = np.empty( (num_obs, self.dim_err)  )
     X_gg = np.empty( num_obs )
-    vv   = np.zeros( (num_obs, self.dim_dl) )   # observatin correction
 
+    # 3.fill the big covarince matrix
     Cov_ll=np.zeros( (num_obs,) + (self.dim_dl, self.dim_dl) )
-    for i in range(num_obs):
-      for j, seg in enumerate(self.slice_dl):
-        Cov_ll[i, seg, seg ] = self.covariances[j][i]
+    for obs_id, obs_covs in enumerate(self.l_covs()):
+      for grp_id, seg, cov in izip(count(), self.slice_dl, obs_covs):
+        Cov_ll[obs_id, seg, seg ] = cov
 
+    # 4. solve
     for it in xrange(maxiter):
       Nm[:,:] = 0
       nv[:] = 0
-      x_arg = self.x_args()
-      for i, l_arg in enumerate(self.l_args()):
+      self._UpdateAllPrmJacobian()
+      x_arrays = self.x_arrays()
+      for obs_id, l_arrays, l_params, l_errs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs()):
         # update Jacobian and residual
-        err, A, B = self.g(*x_arg+l_arg)
-        # append parameterization Jacobian
-        Am[i] = np.hstack( param.ToLocalJacobian(A[:,seg]) for param, seg in zip(self.param_x, self.slice_x) )
-        Bm[i] = np.hstack( param.ToLocalJacobian(B[:,seg]) for param, seg in zip(self.param_l, self.slice_l) )
+        err, A0, B0 = self.g(* (x_arrays + l_arrays) )
+        vv = np.hstack(l_errs)
+
+        # apply parameterization Jacobian
+
+        Am[obs_id] = A = np.hstack( param.ToLocalJacobian(A0[:,seg]) for param, seg in zip(self.x_params, self.slice_x) )
+        Bm[obs_id] = B = np.hstack( param.ToLocalJacobian(B0[:,seg]) for param, seg in zip(     l_params, self.slice_l) )
         # residual
-        Cg[i] = Bm[i].dot(vv[i]) - err
+        Cg[obs_id] = cg = B.dot(vv) - err
 
         # weights of constraints
-        W_gg[i] = inv( Bm[i].dot(Cov_ll[i]).dot(Bm[i].T) ) #
+        W_gg[obs_id] = inv( B.dot(Cov_ll[obs_id]).dot(B.T) ) #
         # test statistic
-        X_gg[i] = np.sqrt( Cg[i].T.dot(W_gg[i]).dot(Cg[i]) )
+        X_gg[obs_id] = np.sqrt( cg.T.dot(W_gg[obs_id]).dot(cg) )
 
       # robust weight function
       sigma_gg = np.median(X_gg)/0.6745
       w = f_w( X_gg/sigma_gg )
 
-      # normal equation
-      for i in xrange(num_obs):
-        ATBWB = Am[i].T.dot(w[i]*W_gg[i])
-        Nm  += ATBWB.dot(Am[i])
-        nv  += ATBWB.dot(Cg[i])
+      # normal equation with modified weight
+      for obs_id in xrange(num_obs):
+        ATBWB = Am[obs_id].T.dot(w[obs_id]*W_gg[obs_id])
+        Nm  += ATBWB.dot(Am[obs_id])
+        nv  += ATBWB.dot(Cg[obs_id])
 
       # solve dx and update
       dx = np.linalg.solve(Nm, nv)
-      for x, param, seg_dx in zip(x_arg, self.param_x, self.slice_dx):
-        x[:] = param.Plus(x, dx[seg_dx])
+      self._Plus_dx(dx)
 
       # solve dl and update
-      for i, l_arg in enumerate(self.l_args()):
-        lamba = W_gg[i].dot( Am[i].dot(dx) - Cg[i] )
-        dl    = -Cov_ll[i].dot( Bm[i].T.dot(lamba) ) - vv[i]
+      for obs_id, l_errs in enumerate(self.l_errs()):
+        vv    = np.hstack( l_errs )
+        lamba = W_gg[obs_id].dot( Am[obs_id].dot(dx) - Cg[obs_id] )
+        dl    = -Cov_ll[obs_id].dot( Bm[obs_id].T.dot(lamba) ) - vv
+        self._Plus_dl(obs_id, dl)
 
-        for l, param, seg_dl in zip(l_arg, self.param_l, self.slice_dl):
-          l[:] = param.Plus(l, dl[seg_dl])
-          vv[i][seg_dl] += dl[seg_dl] # calculate observation-corrections
+      sigma_0 = sum([grp.Cost() for grp in self.l_groups]) / (num_obs * self.dim_err - self.dim_x)
+      print it, sigma_0
 
       if np.abs(dx).max() < Tx:
           break
-    sigma_0 = np.sum([vv[i].dot(inv(Cov_ll[i])).dot(vv[i]) for i in xrange(num_obs)]) / (num_obs*dim_err - self.dim_x)
+
     Cov_xx  = np.linalg.pinv(Nm)
-    return self.x_args(), Cov_xx, sigma_0, vv, w
+    return self.x, Cov_xx, sigma_0, w
 
-#%%
-if __name__ == '__main__':
-
-
-
-  test_ArrayID()
-  test_CompoundVector()
-  test_ProblemBasic()
-  test_ProblemMakeKKT()
-  test_FixAndParameterization()
-
-  def test_SolveWithGESparse():
-    dim_x = 3
-    a = np.ones(dim_x)
-
-    num_l = 100
-    sigma = 0.02
-    s = sigma**2*np.eye(dim_x)
-
-    for trail in range(1):
-      bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
-      problem = GaussHelmertProblem()
-      for i in range(num_l):
-        problem.AddConstraintWithArray(lambda x,y:x-y,
-                                     [ a ],
-                                     [ bs[i] ])
-        problem.SetSigma(bs[i], s)
-
-#    problem.SetParameterization(bs[0], SubsetParameterization([1,1,0]))
-#    problem.SetSigma(bs[0], sigma**2*np.eye(2))
-#    SolveWithGESparseAsGM(problem,fac=True)
-
-    x,le,fac,cov = SolveWithGESparseLM(problem, fac=True, cov=True)
-    print fac
-    problem.ViewJacobianPattern()
-
-
-  def test_SolveWithGESparseAsGM():
-    dim_x = 3
-    a = np.ones(dim_x)
-
-    num_l = 100
-    sigma = 0.02
-    s = sigma**2*np.eye(dim_x)
-    x = np.empty((1000, 3))
-    fac = np.empty(1000)
-    for trail in range(1000):
-      bs = [ a + sigma * np.random.randn(3) for i in range(num_l)]
-      problem = GaussHelmertProblem()
-      for i in range(num_l):
-        problem.AddConstraintWithArray(lambda x,y:x-y,
-                                     [ a ],
-                                     [ bs[i] ])
-        problem.SetSigma(bs[i], s)
-      x[trail],_, fac[trail] = SolveWithGESparseAsGM(problem,fac=True)
-    plt.hist(fac)
-    np.mean(fac)
-    np.mean(x,axis=0)
-
-
+def test_BatchGaussHelmertProblem():
   def g(x0, x1, l0, l1, l2):
     e0 =     x0 - l0
     e1 = 0.5*x1 - l1
     e2 = 0.2*x1 - l2
     Jx = np.vstack( [ np.c_[ np.eye(3),       np.zeros((3,3))],
-                      np.c_[ np.zeros((3,3)), 0.2*np.eye(3)],
-                      np.c_[ np.zeros((3,3)), 0.5*np.eye(3)],])
+                      np.c_[ np.zeros((3,3)), 0.5*np.eye(3)],
+                      np.c_[ np.zeros((3,3)), 0.2*np.eye(3)],])
     Jl = -np.eye(9)
     return np.hstack([e0,e1,e2]), Jx, Jl
 
+  num = 100
   problem = BatchGaussHelmertProblem(g,2,3)
   x0 = np.ones(3)
-  x1 = 2*np.ones(3)
+  cov0 = np.diag([0.2,0.1,0.2])
+  l0 = np.random.multivariate_normal(x0, cov0, num)
 
-  problem.SetParameter(0, x0)
+  x1 = 2*np.ones(3)
+  cov1 = np.diag([0.1,0.1,0.1])
+  l1 = np.random.multivariate_normal(0.5*x1, cov1, num)
+  cov2 = np.diag([0.2,0.1,0.3])
+  l2 = np.random.multivariate_normal(0.2*x1, cov2, num)
+
+  problem.SetParameter(0, x0, SubsetParameterization([0,0,0]))#
   problem.SetParameter(1, x1)
-  for i in range(2):
-    problem.AddObservation(0, np.random.rand(3))
-    problem.AddObservation(1, np.random.rand(3))
-    problem.AddObservation(2, np.random.rand(3))
-  print problem.Solve()
+  for i in range(num):
+    problem.AddObservation(0, l0[i], cov0)
+    problem.AddObservation(1, l1[i], cov1)
+    problem.AddObservation(2, l2[i], cov2)
+  x, Cov_xx, sigma_0, w = problem.Solve()
+
+  assert_array_equal( [x0, x1], x )
+  assert_array_almost_equal(l0[0], l0[1])
+  assert_array_almost_equal(l1[0], l1[1])
+  assert_array_almost_equal(l2[0], l2[1])
+
+  assert_array_equal( x0, np.ones(3) )
+  assert_array_almost_equal(x0, l0[0])
+  assert_array_almost_equal(0.5*x1, l1[0])
+  assert_array_almost_equal(0.2*x1, l2[0])
+
+#%%
+if __name__ == '__main__':
+  test_ArrayID()
+  test_CompoundVector()
+  test_ProblemBasic()
+  test_ProblemMakeKKT()
+  test_FixAndParameterization()
+  test_BatchGaussHelmertProblem()
