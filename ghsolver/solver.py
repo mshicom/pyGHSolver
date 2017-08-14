@@ -1262,7 +1262,7 @@ class BatchGaussHelmertProblem(object):
       grp[obs_id].Plus(dl[seg_dl])
 
 
-  def Solve(self, maxiter=100, Tx=1e-6, f_w=huber_w):
+  def Solve(self, asGM=False, maxiter=100, Tx=1e-6, f_w=huber_w):
     # 1. setup
     self.Setup()
     num_obs = self.num_obs
@@ -1284,14 +1284,16 @@ class BatchGaussHelmertProblem(object):
 
     # 4. solve
     for it in xrange(maxiter):
-      Nm[:,:] = 0
-      nv[:] = 0
+      Nm[:,:]= 0
+      nv[:]  = 0
+      res    = 0
       self._UpdateAllPrmJacobian()
       x_arrays = self.x_arrays()
       for obs_id, l_arrays, l_params, l_errs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs()):
         # update Jacobian and residual
         err, A0, B0 = self.g(* (x_arrays + l_arrays) )
         vv = np.hstack(l_errs)
+        res += np.linalg.norm(err)
 
         # apply parameterization Jacobian
 
@@ -1301,7 +1303,7 @@ class BatchGaussHelmertProblem(object):
         Cg[obs_id] = cg = B.dot(vv) - err
 
         # weights of constraints
-        W_gg[obs_id] = inv( B.dot(Cov_ll[obs_id]).dot(B.T) ) #
+        W_gg[obs_id] = np.linalg.inv( B.dot(Cov_ll[obs_id]).dot(B.T) ) #
         # test statistic
         X_gg[obs_id] = np.sqrt( cg.T.dot(W_gg[obs_id]).dot(cg) )
 
@@ -1323,15 +1325,16 @@ class BatchGaussHelmertProblem(object):
       for obs_id, l_errs in enumerate(self.l_errs()):
         vv    = np.hstack( l_errs )
         lamba = W_gg[obs_id].dot( Am[obs_id].dot(dx) - Cg[obs_id] )
-        dl    = -Cov_ll[obs_id].dot( Bm[obs_id].T.dot(lamba) ) - vv
-        self._Plus_dl(obs_id, dl)
+        if not asGM:
+          dl = -Cov_ll[obs_id].dot( Bm[obs_id].T.dot(lamba) ) - vv
+          self._Plus_dl(obs_id, dl)
 
-      sigma_0 = sum([grp.Cost() for grp in self.l_groups]) / (num_obs * self.dim_err - self.dim_x)
-      print it, sigma_0
+      print it, res
 
       if np.abs(dx).max() < Tx:
           break
-
+    sigma_0 = sum([grp.Cost() for grp in self.l_groups]) / (num_obs * self.dim_err - self.dim_x)
+    print sigma_0
     Cov_xx  = np.linalg.pinv(Nm)
     return self.x, Cov_xx, sigma_0, w
 
