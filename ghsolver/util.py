@@ -34,26 +34,34 @@ def check_magnitude(r):
     raise ValueError("rotation magnitude larger than pi, will cause problems during optimizatoin")
   return r
 
-def MakeSequenceSlice(size_list):
-  offsets = np.cumsum( [0] + list(size_list) )
+def MakeSequenceSlice(size_list, start=0):
+  offsets = np.cumsum( [start] + list(size_list) )
   return [slice(offsets[i], offsets[i+1]) for i in xrange(len(size_list))]
 
-def MakeJacobianFunction(g, *args):
-  arg_sizes= [ len(np.atleast_1d(vec)) for vec in args ]
+def MakeJacobianFunction(g, *args, **kwargs):
+  split = kwargs.get('split', True)
 
+  arg_sizes= [ len(np.atleast_1d(vec)) for vec in args ]
   arg_indices= np.cumsum( arg_sizes )[:-1]
   var       = np.hstack( args )
   var_in    = pycppad.independent( var )
   var_out   = np.atleast_1d( g( *np.split(var_in, arg_indices) ) )
   var_jacobian= pycppad.adfun(var_in, var_out).jacobian
-  def g_jac_auto(*vec):
-    J = var_jacobian( np.hstack(vec) )
-    check_nan(J)
-    check_allzero(J)
-    return np.split(J, arg_indices, axis=1)
+  if split:
+    def g_jac_auto(*vec):
+      J = var_jacobian( np.hstack(vec) )
+      check_nan(J)
+      check_allzero(J)
+      return np.split(J, arg_indices, axis=1)
+  else:
+    def g_jac_auto(*vec):
+      J = var_jacobian( np.hstack(vec) )
+      check_nan(J)
+      check_allzero(J)
+      return J
   return g_jac_auto
 
-def AddJacobian(f):
+def AddJacobian(split=True):
   """
   Examples
   --------
@@ -62,11 +70,13 @@ def AddJacobian(f):
   >>>    return x-y
   >>>  res, jac = foo(np.ones(3), np.zeros(3))
   """
-  def g(*args):
-    if not hasattr(f, 'jac'):
-      f.jac = MakeJacobianFunction(f, *args)
-    return f(*args), f.jac(*args)
-  return g
+  def actual_decorator(f):
+    def g(*args):
+      if not hasattr(f, 'jac'):
+        f.jac = MakeJacobianFunction(f, *args, split=split)
+      return f(*args), f.jac(*args)
+    return g
+  return actual_decorator
 
 def CheckJacobianFunction(g, g_jac=None, *args):
   g_jac_auto   = MakeJacobianFunction(g, *args)

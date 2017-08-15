@@ -216,9 +216,12 @@ def test_AutoDiffLocalParameterization():
 #%% SE3Parameterization
 
 def skew(v):
-    return np.array([[   0, -v[2],  v[1]],
-                     [ v[2],    0, -v[0]],
-                     [-v[1], v[0],    0 ]])
+  return np.array([[   0, -v[2],  v[1]],
+                   [ v[2],    0, -v[0]],
+                   [-v[1], v[0],    0 ]])
+def vee(R):
+  return np.array([-R[1,2], R[0,2], -R[0,1]])
+
 import scipy
 class SE3Parameterization(LocalParameterization):
   """ se(3) = [t, omega]
@@ -653,10 +656,10 @@ def Rot2ax(R):
 #    ln = (0.5*p_div_sinp)*(R-R.T)
 #    return np.array([ln[2,1], ln[0,2], ln[1,0]])
 
-    tr = np.trace(R)
+    tr = np.trace(R)-1
     a  = np.array( [R[2,1]-R[1,2], R[0,2]-R[2,0], R[1,0]-R[0,1]] )
     an = np.linalg.norm(a)
-    phi= np.arctan2(an, tr-1)
+    phi= np.arctan2(an, tr)
     if an > 0.0:
       return phi/an*a
     else:
@@ -753,8 +756,8 @@ class Quaternion(object):
 
   def __init__(self, q):
     self.q = q
-    if np.sign(q[0]) == -1:
-      print "negative Quaternion"
+#    if np.sign(q[0]) == -1:
+#      print "negative Quaternion"
 
   @classmethod
   def FromRot(cls, M):

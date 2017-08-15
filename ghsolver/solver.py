@@ -1234,17 +1234,16 @@ class BatchGaussHelmertProblem(object):
     # parameterization l
     size_list_l  = [grp.dim for grp in self.l_groups]
     self.dim_l   = sum(size_list_l)
-    self.slice_l = MakeSequenceSlice(size_list_l)
+    self.slice_l = MakeSequenceSlice(size_list_l, self.dim_x)
 
     size_list_dl = [grp.dim_delta for grp in self.l_groups]
     self.dim_dl  = sum(size_list_dl)
     self.slice_dl= MakeSequenceSlice(size_list_dl)
 
     # dim_err
-    err, A, B = self.g( * self.x_arrays() + next(self.l_arrays()) )
+    err, J = self.g( * self.x_arrays() + next(self.l_arrays()) )
     self.dim_err = len(err)
-    check_equal(A.shape, (self.dim_err, self.dim_x))
-    check_equal(B.shape, (self.dim_err, self.dim_l))
+    check_equal(J.shape, (self.dim_err, self.dim_x+self.dim_l))
 
 
   def _UpdateAllPrmJacobian(self):
@@ -1291,14 +1290,13 @@ class BatchGaussHelmertProblem(object):
       x_arrays = self.x_arrays()
       for obs_id, l_arrays, l_params, l_errs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs()):
         # update Jacobian and residual
-        err, A0, B0 = self.g(* (x_arrays + l_arrays) )
+        err, J = self.g(* (x_arrays + l_arrays) )
         vv = np.hstack(l_errs)
         res += np.linalg.norm(err)
 
         # apply parameterization Jacobian
-
-        Am[obs_id] = A = np.hstack( param.ToLocalJacobian(A0[:,seg]) for param, seg in zip(self.x_params, self.slice_x) )
-        Bm[obs_id] = B = np.hstack( param.ToLocalJacobian(B0[:,seg]) for param, seg in zip(     l_params, self.slice_l) )
+        Am[obs_id] = A = np.hstack( param.ToLocalJacobian(J[:,seg]) for param, seg in zip(self.x_params, self.slice_x) )
+        Bm[obs_id] = B = np.hstack( param.ToLocalJacobian(J[:,seg]) for param, seg in zip(     l_params, self.slice_l) )
         # residual
         Cg[obs_id] = cg = B.dot(vv) - err
 
@@ -1347,7 +1345,7 @@ def test_BatchGaussHelmertProblem():
                       np.c_[ np.zeros((3,3)), 0.5*np.eye(3)],
                       np.c_[ np.zeros((3,3)), 0.2*np.eye(3)],])
     Jl = -np.eye(9)
-    return np.hstack([e0,e1,e2]), Jx, Jl
+    return np.hstack([e0,e1,e2]), np.c_[Jx, Jl]
 
   num = 100
   problem = BatchGaussHelmertProblem(g,2,3)
