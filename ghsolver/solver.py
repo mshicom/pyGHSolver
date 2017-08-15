@@ -1219,7 +1219,7 @@ class BatchGaussHelmertProblem(object):
 
     group_sizes = [group.size for group in self.l_groups ]
     if len(set(group_sizes)) != 1 or group_sizes[0] == 0:
-      raise RuntimeError("number of observationsnot equal \n %s" % num_obs)
+      raise RuntimeError("number of observationsnot equal \n %s" % group_sizes)
     self.num_obs = group_sizes[0]
 
     # parameterization x

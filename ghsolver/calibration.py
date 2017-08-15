@@ -150,7 +150,6 @@ class AngleAxisPose(Pose):
 
 class QuaternionPose(Pose):
   __slots__ = 'qt'
-  parametriaztion = ProductParameterization(QuaternionParameterization(), IdentityParameterization(3))
   def __init__(self, q, t, id=None, cov=None):
     super(QuaternionPose,self).__init__(id, cov)
     q *= np.sign(q[0])
@@ -172,11 +171,11 @@ class QuaternionPose(Pose):
 
   def AddToProblemAsObservation(self, problem):
     super(QuaternionPose, self).AddToProblemAsObservation(problem)
-    problem.SetParameterizationWithID(self.param_id[0], self.parametriaztion)
+    problem.SetParameterizationWithID(self.param_id[0], ProductParameterization(QuaternionParameterization(), IdentityParameterization(3)))
 
   def AddToProblemAsParameter(self, problem):
     super(QuaternionPose, self).AddToProblemAsParameter(problem)
-    problem.SetParameterizationWithID(self.param_id[0], self.parametriaztion)
+    problem.SetParameterizationWithID(self.param_id[0], ProductParameterization(QuaternionParameterization(), IdentityParameterization(3)))
 
   @property
   def M(self):

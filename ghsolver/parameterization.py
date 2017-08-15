@@ -712,6 +712,12 @@ def MfromRT(r,t):
   T[:3, 3] = t
   return T
 
+def MfromQT(q,t):
+  T = np.eye(4)
+  T[:3,:3] = Quaternion(q).ToRot()
+  T[:3, 3] = t
+  return T
+
 def invT(T):
   R, t = T[:3, :3], T[:3, 3]
 
@@ -788,6 +794,10 @@ class Quaternion(object):
       q *= np.sign(q[0])
     return cls(q)
 
+  def AddNoise(self, cov_r):
+    r = np.random.multivariate_normal(np.zeros(3), cov_r)
+    return Quaternion.FromAngleAxis(r) * self
+
   def ToRot(self):
     q = self.q.copy()
     n = np.dot(q, q)
@@ -799,6 +809,9 @@ class Quaternion(object):
         [1.0-q[2, 2]-q[3, 3],     q[1, 2]-q[3, 0],     q[1, 3]+q[2, 0]],
         [    q[1, 2]+q[3, 0], 1.0-q[1, 1]-q[3, 3],     q[2, 3]-q[1, 0]],
         [    q[1, 3]-q[2, 0],     q[2, 3]+q[1, 0], 1.0-q[1, 1]-q[2, 2]]])
+
+  def RotatePoint(self, v):
+    return np.dot( self.ToRot(), v )
 
   def Normalize(self):
     self.q /= self.Norm()
@@ -829,7 +842,6 @@ class Quaternion(object):
   def __mul__(q0, q1):
     L0 = q0.ToMulMatL()
     q01 = L0.dot(q1.q)
-    q01 *= np.sign(q01[0])
     return Quaternion(q01)
 
   def __getitem__(self, index):
@@ -890,8 +902,8 @@ class QuaternionParameterization(LocalParameterization):
   def Plus(self, x, delta):
     norm_delta = np.linalg.norm(delta)
     if norm_delta>0:
-      sin_delta_by_delta = np.sin(norm_delta) / norm_delta
-      q_delta = np.hstack([np.cos(norm_delta), sin_delta_by_delta*delta ])
+      sin_delta_by_delta = np.sin(0.5*norm_delta) / norm_delta
+      q_delta = np.hstack([np.cos(0.5*norm_delta), sin_delta_by_delta*delta ])
       return QuaternionProduct(q_delta, x)
     else:
       return x
@@ -903,10 +915,10 @@ class QuaternionParameterization(LocalParameterization):
     return 3
 
   def ComputeJacobian(self, x):
-    return np.array([ [-x[1], -x[2], -x[3] ],
-                      [ x[0],  x[3], -x[2] ],
-                      [-x[3],  x[0],  x[1] ],
-                      [ x[2], -x[1],  x[0] ] ])
+    return 0.5*np.array([ [-x[1], -x[2], -x[3] ],
+                          [ x[0],  x[3], -x[2] ],
+                          [-x[3],  x[0],  x[1] ],
+                          [ x[2], -x[1],  x[0] ] ])
 
 def test_QuaternionParameterization():
 
