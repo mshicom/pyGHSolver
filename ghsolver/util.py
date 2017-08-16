@@ -142,6 +142,20 @@ from vtk_visualizer import get_vtk_control
 import vtk
 from vtk.util import numpy_support
 
+def PlotAxes(pose, length=1, hold=True):
+    "Create a coordinate axes system with a given length of the axes"
+    axesActor = vtk.vtkAxesActor()
+    axesActor.AxisLabelsOff()
+    axesActor.SetTotalLength(length, length, length)
+    m = vtk.vtkMatrix4x4()
+    m.DeepCopy(np.ravel(pose).tolist())
+    axesActor.SetUserMatrix(m)
+    if not hold:
+        get_vtk_control().RemoveAllActors()
+    get_vtk_control().AddActor(axesActor)
+    return axesActor
+
+
 def AxesPolyData():
    # Create input point data.
   newPts = vtk.vtkPoints()

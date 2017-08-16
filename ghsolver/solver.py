@@ -1096,7 +1096,7 @@ def exp_w(c=2):
     return _exp_w
 
 from collections import  namedtuple
-from itertools import izip, count
+from itertools import izip, count, compress
 class BatchGaussHelmertProblem(object):
   class Observation(object):
     __slots__ = "array","param","cov","err"
@@ -1136,6 +1136,7 @@ class BatchGaussHelmertProblem(object):
   class ObservationGroup(object):
     def __init__(self):
       self.elements = []
+      self.notfixed = True
 
     def Add(self, obs):
       # check
@@ -1211,6 +1212,8 @@ class BatchGaussHelmertProblem(object):
     obs_id = self.l_groups[slot].Add( new_observation )
     return obs_id, new_observation.err
 
+  def SetObservationGroupFixiation(self, slot, fix):
+    self.l_groups[slot].notfixed = not bool(fix)
 
   def Setup(self):
     for arr in self.x:
@@ -1233,12 +1236,14 @@ class BatchGaussHelmertProblem(object):
 
     # parameterization l
     size_list_l  = [grp.dim for grp in self.l_groups]
-    self.dim_l   = sum(size_list_l)
     self.slice_l = MakeSequenceSlice(size_list_l, self.dim_x)
+    self.dim_l   = sum(size_list_l)
 
-    size_list_dl = [grp.dim_delta for grp in self.l_groups]
-    self.dim_dl  = sum(size_list_dl)
+    size_list_dl = [ grp.dim_delta if grp.notfixed else 0 for grp in self.l_groups ] # not include fixed observations
     self.slice_dl= MakeSequenceSlice(size_list_dl)
+    self.dim_dl  = sum(size_list_dl)
+
+    self.l_notfixeds = [ grp.notfixed for grp in self.l_groups ]
 
     # dim_err
     err, J = self.g( * self.x_arrays() + next(self.l_arrays()) )
@@ -1250,7 +1255,8 @@ class BatchGaussHelmertProblem(object):
     for x, param in izip(self.x, self.x_params):
       param.UpdateJacobian(x)
     for grp in self.l_groups:
-      grp.UpdatePrmJacobian()
+      if grp.notfixed:
+        grp.UpdatePrmJacobian()
 
   def _Plus_dx(self, dx):
     for x, param, seg_dx in zip(self.x, self.x_params, self.slice_dx):
@@ -1258,7 +1264,8 @@ class BatchGaussHelmertProblem(object):
 
   def _Plus_dl(self, obs_id, dl):
     for grp, seg_dl in zip(self.l_groups, self.slice_dl):
-      grp[obs_id].Plus(dl[seg_dl])
+      if grp.notfixed:
+        grp[obs_id].Plus(dl[seg_dl])
 
 
   def Solve(self, asGM=False, maxiter=100, Tx=1e-6, f_w=huber_w):
@@ -1278,8 +1285,8 @@ class BatchGaussHelmertProblem(object):
     # 3.fill the big covarince matrix
     Cov_ll=np.zeros( (num_obs,) + (self.dim_dl, self.dim_dl) )
     for obs_id, obs_covs in enumerate(self.l_covs()):
-      for grp_id, seg, cov in izip(count(), self.slice_dl, obs_covs):
-        Cov_ll[obs_id, seg, seg ] = cov
+      for grp_id, seg, cov in compress( izip(count(), self.slice_dl, obs_covs), self.l_notfixeds):
+          Cov_ll[obs_id, seg, seg ] = cov
 
     # 4. solve
     for it in xrange(maxiter):
@@ -1291,17 +1298,19 @@ class BatchGaussHelmertProblem(object):
       for obs_id, l_arrays, l_params, l_errs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs()):
         # update Jacobian and residual
         err, J = self.g(* (x_arrays + l_arrays) )
-        vv = np.hstack(l_errs)
+        vv = np.hstack( compress(l_errs, self.l_notfixeds) )
         res += np.linalg.norm(err)
 
         # apply parameterization Jacobian
-        Am[obs_id] = A = np.hstack( param.ToLocalJacobian(J[:,seg]) for param, seg in zip(self.x_params, self.slice_x) )
-        Bm[obs_id] = B = np.hstack( param.ToLocalJacobian(J[:,seg]) for param, seg in zip(     l_params, self.slice_l) )
+        Am[obs_id] = A = np.hstack( param.ToLocalJacobian(J[:,seg])
+                                      for param, seg in zip(self.x_params, self.slice_x) )
+        Bm[obs_id] = B = np.hstack( param.ToLocalJacobian(J[:,seg])
+                                      for param, seg in compress(zip(l_params, self.slice_l), self.l_notfixeds))
         # residual
         Cg[obs_id] = cg = B.dot(vv) - err
 
         # weights of constraints
-        W_gg[obs_id] = np.linalg.inv( B.dot(Cov_ll[obs_id]).dot(B.T) ) #
+        W_gg[obs_id] = np.linalg.pinv( B.dot(Cov_ll[obs_id]).dot(B.T) ) #
         # test statistic
         X_gg[obs_id] = np.sqrt( cg.T.dot(W_gg[obs_id]).dot(cg) )
 
@@ -1320,10 +1329,10 @@ class BatchGaussHelmertProblem(object):
       self._Plus_dx(dx)
 
       # solve dl and update
-      for obs_id, l_errs in enumerate(self.l_errs()):
-        vv    = np.hstack( l_errs )
-        lamba = W_gg[obs_id].dot( Am[obs_id].dot(dx) - Cg[obs_id] )
-        if not asGM:
+      if not asGM:
+        for obs_id, l_errs in enumerate(self.l_errs()):
+          vv    = np.hstack( compress(l_errs, self.l_notfixeds) )
+          lamba = W_gg[obs_id].dot( Am[obs_id].dot(dx) - Cg[obs_id] )
           dl = -Cov_ll[obs_id].dot( Bm[obs_id].T.dot(lamba) ) - vv
           self._Plus_dl(obs_id, dl)
 
@@ -1340,7 +1349,7 @@ def test_BatchGaussHelmertProblem():
   def g(x0, x1, l0, l1, l2):
     e0 =     x0 - l0
     e1 = 0.5*x1 - l1
-    e2 = 0.2*x1 - l2
+    e2 = 0.5*x1 - l2
     Jx = np.vstack( [ np.c_[ np.eye(3),       np.zeros((3,3))],
                       np.c_[ np.zeros((3,3)), 0.5*np.eye(3)],
                       np.c_[ np.zeros((3,3)), 0.2*np.eye(3)],])
@@ -1365,17 +1374,16 @@ def test_BatchGaussHelmertProblem():
     problem.AddObservation(0, l0[i], cov0)
     problem.AddObservation(1, l1[i], cov1)
     problem.AddObservation(2, l2[i], cov2)
+  problem.SetObservationGroupFixiation(2, True)
   x, Cov_xx, sigma_0, w = problem.Solve()
 
   assert_array_equal( [x0, x1], x )
   assert_array_almost_equal(l0[0], l0[1])
   assert_array_almost_equal(l1[0], l1[1])
-  assert_array_almost_equal(l2[0], l2[1])
 
   assert_array_equal( x0, np.ones(3) )
   assert_array_almost_equal(x0, l0[0])
   assert_array_almost_equal(0.5*x1, l1[0])
-  assert_array_almost_equal(0.2*x1, l2[0])
 
 #%%
 if __name__ == '__main__':
