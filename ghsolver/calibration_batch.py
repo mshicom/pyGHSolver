@@ -36,6 +36,17 @@ class QTParameterization(ProductParameterization):
     q = Quaternion(qFromM(M)).AddNoise(cov_q).q
     t = np.random.multivariate_normal(tFromM(M), cov_t)
     return MfromQT(q, t)
+
+  @staticmethod
+  def FromM(M):
+    return np.hstack([qFromM(M), tFromM(M)])
+
+  @staticmethod
+  def ToM(qt):
+    return MfromQT(qt[:4], qt[4:])
+
+
+
 ToQt = QTParameterization.ToQt
 
 class Pose(object):
