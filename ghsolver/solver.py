@@ -1207,6 +1207,10 @@ class BatchGaussHelmertProblem(object):
     self.x[slot] = array
     self.x_params[slot] = param
 
+  def ChangeParameterParameterization(self, slot, param=None):
+    assert not self.x[slot] is None
+    self.SetParameter(slot, self.x[slot], param)
+
   def AddObservation(self, slot, array, cov=None, param=None):
     new_observation = BatchGaussHelmertProblem.Observation( array, param, cov)
     obs_id = self.l_groups[slot].Add( new_observation )
@@ -1368,7 +1372,7 @@ def test_BatchGaussHelmertProblem():
   cov2 = np.diag([0.2,0.1,0.3])
   l2 = np.random.multivariate_normal(0.2*x1, cov2, num)
 
-  problem.SetParameter(0, x0, SubsetParameterization([0,0,0]))#
+  problem.SetParameter(0, x0, ConstantParameterization(3))#
   problem.SetParameter(1, x1)
   for i in range(num):
     problem.AddObservation(0, l0[i], cov0)

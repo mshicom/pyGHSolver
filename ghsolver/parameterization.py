@@ -136,6 +136,8 @@ class SubsetParameterization(LocalParameterization):
     self.local_size  = len(self.active_indice)
 
     self.jacobian = np.eye(self.global_size)[:,self.active_indice]
+    if self.local_size == 0:
+      print "local_size is zero, you could use ConstantParameterization to fix all variable"
 
   def Plus(self, x, delta):
     x_ = x.copy()
@@ -163,6 +165,28 @@ def test_SubsetParameterization():
   assert(par.LocalSize()  == 1)
   assert( np.all( par.ComputeJacobian(None) == np.array([ [1],[0],[0] ]) ) )
   print "test_SubsetParameterization passed "
+
+class ConstantParameterization(LocalParameterization):
+  def __init__(self, size):
+    super(ConstantParameterization, self).__init__()
+    self.size = size
+    self.empty = np.array([]).reshape(size, 0)
+
+  def Plus(self, x, delta):
+    return x
+
+  def GlobalSize(self):  return self.size
+  def LocalSize(self):   return 0
+
+  def ComputeJacobian(self, x):
+    return self.empty
+
+  def ToLocalJacobian(self, Jx):
+    return np.array([]).reshape(np.shape(Jx)[0], 0)
+
+  def UpdateJacobian(self, x):
+    pass
+
 
 #%% AutoDiffLocalParameterization
 def MakeParameterization(plus_func, x0, delta0):
