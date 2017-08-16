@@ -1122,6 +1122,9 @@ class BatchGaussHelmertProblem(object):
       W = np.linalg.inv( self.cov )
       return self.err.dot( W ).dot(self.err)
 
+    def ClearErr(self):
+      self.err[:] = 0
+
     @property
     def dim(self): return len(self.array)
     @property
@@ -1146,6 +1149,10 @@ class BatchGaussHelmertProblem(object):
     def UpdatePrmJacobian(self):
       for e in self.elements:
         e.UpdatePrmJacobian()
+
+    def ClearErr(self):
+      for e in self.elements:
+        e.ClearErr()
 
     def Cost(self):
       return sum( e.Cost() for e in self.elements  )
@@ -1248,6 +1255,10 @@ class BatchGaussHelmertProblem(object):
     self.dim_err = len(err)
     check_equal(J.shape, (self.dim_err, self.dim_x+self.dim_l))
 
+    # clear observation corrections
+    if 0:
+      for grp in self.l_groups:
+        grp.ClearErr()
 
   def _UpdateAllPrmJacobian(self):
     for x, param in izip(self.x, self.x_params):
