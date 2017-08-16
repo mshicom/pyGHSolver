@@ -1084,16 +1084,10 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 #  return ret
 
 #%%
-def huber_w(y):
-    return np.fmin(1, 1/np.abs(y))
-
-def huber_w_smooth(y):
-    return 1/np.sqrt(1 + y**2)
-
-def exp_w(c=2):
-    def _exp_w(y):
-        return np.exp(-0.5*y**2/c**2)
-    return _exp_w
+_robust_func = { 'none'        : lambda y : np.ones_like(y) ,
+                 'huber'       : lambda y : np.fmin(1.0, 1.0/np.abs(y)),
+                 'huber_smooth': lambda y : 1.0/np.sqrt(1.0 + y**2),
+                 'exp_2'       : lambda y : np.exp(-0.5*y**2/4),    }# np.exp(-0.5*y**2/c**2), c=2}
 
 from collections import  namedtuple
 from itertools import izip, count, compress
@@ -1272,10 +1266,11 @@ class BatchGaussHelmertProblem(object):
         grp[obs_id].Plus(dl[seg_dl])
 
 
-  def Solve(self, asGM=False, maxiter=100, Tx=1e-6, f_w=huber_w):
+  def Solve(self, asGM=False, maxiter=100, Tx=1e-6, weight='none'):
     # 1. setup
     self.Setup()
     num_obs = self.num_obs
+    f_w = _robust_func[weight]
 
     # 2.allocate space
     Am   = np.empty( (num_obs,) + (self.dim_err, self.dim_dx) )
