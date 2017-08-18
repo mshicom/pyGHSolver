@@ -325,7 +325,7 @@ class AbsTrajectory(Trajectory):
 
     for p_base, p_end in zip(self.poses[:-interval],self.poses[interval:]):
       if np.allclose(p_base.M, p_end.M):
-        pass
+        continue
 
       else:
         drdt, J = AbsTrajectory.RelT(p_base.r, p_base.t, p_end.r, p_end.t)

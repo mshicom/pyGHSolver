@@ -47,6 +47,7 @@ class QTParameterization(ProductParameterization):
 
 
 
+
 ToQt = QTParameterization.ToQt
 
 class Pose(object):
@@ -90,6 +91,14 @@ class Pose(object):
     """used in AbsTrajectory.ToRel"""
     raise NotImplementedError("")
 
+  @staticmethod
+  def Adjoint(M):
+    R, t = M[:3,:3], M[:3,3]
+    A = np.zeros((6,6))
+    A[:3,:3] = A[3:,3:] = R
+    A[3:,:3] = np.dot(skew(t), R)
+    return A
+
 
 class QuaternionPose(Pose):
   __slots__ = 'qt'
@@ -111,12 +120,15 @@ class QuaternionPose(Pose):
   def ApplyTransform(self, M):
     M_new = np.dot(M, self.M)
     self.qt[:] = np.hstack([qFromM(M_new), tFromM(M_new)])
+    return self
 
   def AddToProblemAsObservation(self, problem, slot):
     self.param_id, self.err = problem.AddObservation(slot, self.param, self.cov, QTParameterization())
+    return self
 
   def AddToProblemAsParameter(self, problem, slot):
     problem.SetParameter(slot, self.param, QTParameterization())
+    return self
 
   @property
   def M(self):
@@ -125,11 +137,48 @@ class QuaternionPose(Pose):
     M[:3, 3] = self.t
     return M
 
+  @staticmethod
+  def Plus(a, b):
+    """used in RelTrajectory.ToAbs"""
+    q_a, t_a = ToQt(a.qt)
+    q_b, t_b = ToQt(b.qt)
+
+    q = (q_a * q_b).q
+    t = q_a.Rotatepoint(t_b) + t_a
+
+    if not a.cov is None and not b.cov is None:
+      A = Pose.Adjoint(a.M)
+      cov = a.cov + A.dot(b.cov).dot(A.T)
+    else:
+      cov = None
+    return QuaternionPose(q, t, b.id, cov)
+
+  @staticmethod
+  def Diff(a, b):
+    """used in AbsTrajectory.ToRel"""
+    q_a, t_a = ToQt(a.qt)
+    q_b, t_b = ToQt(b.qt)
+
+    q = (q_a.Inv() * q_b).q
+    t = q_a.Inv().RotatePoint(t_b - t_a)
+
+    if not a.cov is None and not b.cov is None:
+      A = Pose.Adjoint( invT(a.M) )
+      cov = A.dot( a.cov + b.cov ).dot(A.T)
+    else:
+      cov = None
+    return QuaternionPose(q, t, b.id, cov)
+
   def __repr__(self):
     return "QuaternionPose %s:(%s,%s)" % (self.id, self.r, self.t)
 
 from bisect import bisect_left
 class Trajectory(object):
+  def __init__(self):
+    self.name = "none"
+    self.poses = []
+    self.slot = -1
+
   @classmethod
   def FromPoseData(cls, M_list, cov_list, timestamp=None, pose_class=QuaternionPose):
     num_pos = len(M_list)
@@ -153,10 +202,14 @@ class Trajectory(object):
     trj.poses.sort(key=lambda p:p.id)
     return trj
 
-  def __init__(self):
-    self.name = "none"
-    self.poses = []
-    self.slot = -1
+  def SimulateNoise(self, cov=None):
+    zero = np.zeros(6)
+    for p in self.poses:
+      drdt = np.random.multivariate_normal(zero, p.cov if cov is None else cov)
+      p.r[:] = (Quaternion.FromAngleAxis(drdt[:3]) * Quaternion(p.r)).q
+      p.t[:] += drdt[3:]
+#      p.ApplyTransform(MfromRT(drdt[:3], drdt[3:]))
+    return self
 
   def AddPosesToProblemAsObservation(self, problem, skip_first=False):
     assert self.slot != -1
@@ -219,22 +272,29 @@ class RelTrajectory(Trajectory):
   def FromPoseData(cls, M_list, cov_list, timestamp=None):
     return super(RelTrajectory, cls).FromPoseData(M_list, cov_list, timestamp, QuaternionPose)
 
-#  def ToAbs(self, M0=np.eye(4) ):
-#    PoseClass = type(self.poses[0])
-#    pose_list = [PoseClass( M = M0, id = 0, cov = np.zeros(6) )]
-#
-#    for dp in self.poses:
-#      p_last = pose_list[-1]
-#      if np.array_equal(p_last.M, np.eye(4)): # a hack when r,t=0
-#        pose = PoseClass( M = dp.M,
-#                     id = len(pose_list),
-#                     cov= dp.cov)
-#      else:
-#        pose = PoseClass.Add(p_last, dp)
-#        pose.id = len(pose_list)
-#      pose_list.append(pose)
-#
-#    return AbsTrajectory.FromPoseList(pose_list)
+  def ToAbs(self, M0=np.eye(4) ):
+    PoseClass = type(self.poses[0])
+    pose_list = [PoseClass( M = M0, id = 0, cov = np.zeros(6) )]
+
+    for dp in self.poses:
+      p_last = pose_list[-1]
+      if np.array_equal(p_last.M, np.eye(4)): # a hack when r,t=0
+        pose = PoseClass( M = dp.M,
+                     id = len(pose_list),
+                     cov= dp.cov)
+      else:
+        pose = QuaternionPose.Plus(p_last, dp)
+        pose.id = len(pose_list)
+      pose_list.append(pose)
+
+    return AbsTrajectory.FromPoseList(pose_list)
+
+  def MakeConjugate(self, M):
+    raise NotImplementedError("")
+    pose_list = []
+    M_inv = invT(M)
+    for dp in self.poses:
+      pass
 
 
 class AbsTrajectory(Trajectory):
@@ -245,44 +305,27 @@ class AbsTrajectory(Trajectory):
   def FromPoseData(cls, M_list, cov_list, timestamp=None):
     return super(AbsTrajectory, cls).FromPoseData(M_list, cov_list, timestamp, QuaternionPose)
 
-#  @staticmethod
-#  @AddJacobian
-#  def RelT(r1,t1,r2,t2):
-#    r12 = axAdd(-r1,r2)
-#    t12 = ax2Rot(-r1).dot(t2-t1)
-#    return np.hstack([r12, t12])
-
 #  def SetFirstPoseFix(self, problem):
 #    problem.SetVarFixedWithID(self.poses[0].param_id[0])
 
-#  def ToRel(self, interval=1):
-#    pose_list = []
-#
-#    for p_base, p_end in zip(self.poses[:-interval],self.poses[interval:]):
-#      if np.allclose(p_base.M, p_end.M):
-#        pass
-#
-#      else:
-#        drdt, J = AbsTrajectory.RelT(p_base.r, p_base.t, p_end.r, p_end.t)
-#        J = np.hstack(J)
-#        Cov_abs = block_diag(p_base.cov, p_end.cov)
-#        cov_drdt = J.dot(Cov_abs).dot(J.T)
-#
-#        pose = AngleAxisPose( drdt[:3], drdt[3:],
-#                              id = p_end.id,
-#                              cov= cov_drdt)
-#      pose_list.append(pose)
-#
-#    return RelTrajectory.FromPoseList(pose_list)
+  def ToRel(self, interval=1):
+    pose_list = []
+    for p_base, p_end in zip(self.poses[:-interval],self.poses[interval:]):
+      if not np.allclose(p_base.M, p_end.M):
+        pose = QuaternionPose.Diff( p_base,  p_end )
+        pose_list.append(pose)
+    return RelTrajectory.FromPoseList(pose_list)
 
   def Plot(self, scale=1, select=slice(None), **kwarg):
     PlotPose(self.M[select], scale, **kwarg)
+    return self
 
   def Rebase(self, M=None):
     if M is None:
       M = invT(self.poses[0].M)
     for p in self.poses:
       p.ApplyTransform(M)
+    return self
 
 
 class BatchCalibrationProblem(object):
@@ -305,44 +348,101 @@ class BatchCalibrationProblem(object):
     # 1.solve rotation
     if isinstance(self.trajectory[base][0], QuaternionPose):
       # method A with quaternion
-      q_b = map(Quaternion, self.trajectory[base].r)
-      q_o = map(Quaternion, self.trajectory[opponent].r)
-      R_o = map(lambda q:q.ToRot(),  q_o)
+      q_a = map(Quaternion, self.trajectory[base].r)
+      q_b = map(Quaternion, self.trajectory[opponent].r)
+      R_b = map(lambda q:q.ToRot(),  q_b)
 
-      H  = [ q.ToMulMatL() - p.ToMulMatR() for q,p in zip(q_o, q_b) ] # L(q_o)*q_ob - R(q_b)*q_ob = 0, st. |q_ob|=1
+      H  = [ q.ToMulMatL() - p.ToMulMatR() for q,p in zip(q_b, q_a) ] # L(q_b)*q_ba - R(q_a)*q_ba = 0, st. |q_ba|=1
       _, s, V = np.linalg.svd(np.vstack( H ), full_matrices=0)
-      q_ob = V[3]   # eigen vector with smallest eigen value
-      R_ob = Quaternion(q_ob).ToRot()
+      q_ba = V[3]   # eigen vector with smallest eigen value
+      R_ba = Quaternion(q_ba).ToRot()
 
     else:
       # method B with angle-axis
-      r_b = np.asarray(self.trajectory[base].r)
-      r_o = np.asarray(self.trajectory[opponent].r)
-      R_o = map(ax2Rot, r_o)
+      r_a = np.asarray(self.trajectory[base].r)
+      r_b = np.asarray(self.trajectory[opponent].r)
+      R_b = map(ax2Rot, r_b)
 
-      H = r_b.T.dot(r_o)
+      H = r_a.T.dot(r_b)
       U, d, Vt = np.linalg.svd(H)
-      R_ob = Vt.T.dot(U.T)
+      R_ba = Vt.T.dot(U.T)
 
     # 2.solve translation given rotation
-    t_b = np.asarray(self.trajectory[base].t)
-    t_o = np.asarray(self.trajectory[opponent].t)
+    t_a = np.asarray(self.trajectory[base].t)
+    t_b = np.asarray(self.trajectory[opponent].t)
     I = np.eye(3)
-    A = np.vstack([ I - R for R in R_o])
-    b = np.hstack( t_o - ( R_ob.dot(t_b.T) ).T )
-    t_ob = np.linalg.lstsq(A, b)[0]
+    A = np.vstack([ I - R for R in R_b])
+    b = np.hstack( t_b - ( R_ba.dot(t_a.T) ).T )
+    t_ba = np.linalg.lstsq(A, b)[0]
 
     # 3.final result
-    M_ob = np.eye(4)
-    M_ob[:3,:3], M_ob[:3,3] = R_ob, t_ob
-    return M_ob
+    M_ba = np.eye(4)
+    M_ba[:3,:3], M_ba[:3,3] = R_ba, t_ba
+    return M_ba
 
-  def MakeProblemWithAbsModel(self, base, M0_dict={}):
+  def MakeProblemWithModelA(self, base, dict_M_ba):
     # check
+    check_unique([len(trj) for trj in self.trajectory.values()])
+    for trj in self.trajectory.values():
+      assert isinstance(trj, AbsTrajectory)
+
+    # define constraint function
+    num_sensors = len(self.trajectory)
+    num_x = num_sensors-1
+    num_l = num_sensors
+
+    @AddJacobian(split=False)
+    def GlobalConstraint(*args):
+      # separate parameters and observation from one large args
+      # args = x_args + l_args
+      x_args, l_args = list(args[:num_x]), list(args[num_x:])
+      e = []
+      # base trajectory is the first
+      q_wa, t_wa = ToQt(l_args.pop(0))
+      # loop through trajectory-pair
+      for qt_ba, qt_wb in zip(x_args, l_args):
+        q_ba, t_ba = ToQt(qt_ba)   # other -> base
+        q_wb, t_wb = ToQt(qt_wb)
+        # R_wb * R_ba = R_wa
+        err_q = ( q_wb * q_ba * q_wa.Inv()).q[1:]
+        # t_wb + R_wb * t_ba = t_wa
+        err_t = t_wb + q_wb.RotatePoint(t_ba) - t_wa
+        e += [err_q, err_t]
+      return np.hstack(e)
+
+    # assign slot
+    self.trajectory[base].slot = 0
+    opp_key = self.trajectory.keys()
+    opp_key.remove(base)
+    for slot, key in enumerate(opp_key):
+      self.trajectory[key].slot = slot+1
+
+    problem = BatchGaussHelmertProblem(GlobalConstraint, num_x, num_l)
+    for key in opp_key:
+      trj = self.trajectory[key]
+      # parameter, get init guess
+      if key in dict_M_ba:
+        M_ba = dict_M_ba[key]
+      else:
+        raise ValueError("Inital guest must be provided")
+#        M_ba = self.SolveDirect(base, key)
+#        print "Init guess for %s:\n%s" %(key, M_ba)
+      P_ba = QuaternionPose.FromM(M_ba)
+      P_ba.AddToProblemAsParameter(problem, trj.slot-1)
+      self.calibration[key][base] = P_ba     # other <- base
+      # observation
+      trj.AddPosesToProblemAsObservation(problem, skip_first=True)
+    self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=True)
+
+    return problem
+
+  def MakeProblemWithModelB(self, base, dict_M_ba={}):
+    # check
+    check_unique([len(trj) for trj in self.trajectory.values()])
     for trj in self.trajectory.values():
       assert isinstance(trj, AbsTrajectory)
       if not np.allclose( trj[0].M, np.eye(4) ):
-        raise RuntimeWarning('First pose is not Identity, please use trj.Rebase() to make so.')
+        print 'First pose is not Identity, please use trj.Rebase() to make so.'
 
     # define constraint function
     num_sensors = len(self.trajectory)
@@ -356,13 +456,13 @@ class BatchCalibrationProblem(object):
       x_args, l_args = list(args[:num_x]), list(args[num_x:])
       e = []
       # base trajectory is the first
-      q_b, t_b = ToQt(l_args.pop(0))
+      q_a, t_a = ToQt(l_args.pop(0))
       # loop through trajectory-pair
-      for qt_ob, qt_o in zip(x_args, l_args):
-        q_ob, t_ob = ToQt(qt_ob)   # other -> base
-        q_o , t_o  = ToQt(qt_o)
-        err_q = ( q_o * q_ob * q_b.Inv() * q_ob.Inv() ).q[1:]
-        err_t = t_ob + q_ob.RotatePoint(t_b) - q_o.RotatePoint(t_ob) - t_o
+      for qt_ba, qt_b in zip(x_args, l_args):
+        q_ba, t_ba = ToQt(qt_ba)   # other -> base
+        q_b , t_b  = ToQt(qt_b)
+        err_q = ( q_b * q_ba * q_a.Inv() * q_ba.Inv() ).q[1:]
+        err_t = t_ba + q_ba.RotatePoint(t_a) - q_b.RotatePoint(t_ba) - t_b
         e += [err_q, err_t]
       return np.hstack(e)
 
@@ -377,18 +477,68 @@ class BatchCalibrationProblem(object):
     for key in opp_key:
       trj = self.trajectory[key]
       # parameter, get init guess
-      if key in M0_dict:
-        Mob = M0_dict[key]
+      if key in dict_M_ba:
+        M_ba = dict_M_ba[key]
       else:
-        Mob = self.SolveDirect(base, key)
-        print "Init guess for %s:\n%s" %(key, Mob)
-      Pob = QuaternionPose.FromM(Mob)
+        M_ba = self.SolveDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, M_ba)
+      Pob = QuaternionPose.FromM(M_ba)
       Pob.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = Pob     # other <- base
       # observation
       trj.AddPosesToProblemAsObservation(problem, skip_first=True)
     self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=True)
+    return problem
 
+  def MakeProblemWithModelC(self, base, dict_M_ba={}):
+    check_unique([len(trj) for trj in self.trajectory.values()])
+    for trj in self.trajectory.values():
+      assert isinstance(trj, RelTrajectory)
+
+    # define constraint function
+    num_sensors = len(self.trajectory)
+    num_x = num_sensors-1
+    num_l = num_sensors
+
+    @AddJacobian(split=False)
+    def RelativeConstraint(*args):
+      # separate parameters and observation from one large args
+      # args = x_args + l_args
+      x_args, l_args = list(args[:num_x]), list(args[num_x:])
+      e = []
+      # base trajectory is the first
+      q_a, t_a = ToQt(l_args.pop(0))
+      # loop through trajectory-pair
+      for qt_ba, qt_b in zip(x_args, l_args):
+        q_ba, t_ba = ToQt(qt_ba)   # other -> base
+        q_b , t_b  = ToQt(qt_b)
+        err_q = ( q_b * q_ba * q_a.Inv() * q_ba.Inv() ).q[1:]
+        err_t = t_ba + q_ba.RotatePoint(t_a) - q_b.RotatePoint(t_ba) - t_b
+        e += [err_q, err_t]
+      return np.hstack(e)
+
+    # assign slot
+    self.trajectory[base].slot = 0
+    opp_key = self.trajectory.keys()
+    opp_key.remove(base)
+    for slot, key in enumerate(opp_key):
+      self.trajectory[key].slot = slot+1
+
+    problem = BatchGaussHelmertProblem(RelativeConstraint, num_x, num_l)
+    for key in opp_key:
+      trj = self.trajectory[key]
+      # parameter, get init guess
+      if key in dict_M_ba:
+        M_ba = dict_M_ba[key]
+      else:
+        M_ba = self.SolveDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, M_ba)
+      P_ba = QuaternionPose.FromM(M_ba)
+      P_ba.AddToProblemAsParameter(problem, trj.slot-1)
+      self.calibration[key][base] = P_ba     # other <- base
+      # observation
+      trj.AddPosesToProblemAsObservation(problem, skip_first=False)
+    self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=False)
     return problem
 
   def FillCalibration(self):
@@ -425,8 +575,8 @@ class BatchCalibrationProblem(object):
 if __name__ == '__main__':
 
   if 1:
-    num_sensor = 3
-    num_seg = 1000
+    num_sensor = 2
+    num_seg = 100
     def add_n_noise(sigma):
       return lambda x: x + sigma*np.random.randn(3)
     def add_u_noise(scale):
@@ -435,16 +585,15 @@ if __name__ == '__main__':
 #    np.random.seed(20)
 
     ConjugateM = lambda dM1, M21 : M21.dot(dM1).dot(invT(M21))
-    d2r =  lambda deg: np.pi*deg/180
     def deep_map(function, list_of_list):
       if not isinstance(list_of_list[0], list):
         return map(function, list_of_list)
       return [ deep_map(function, l) for l in list_of_list ]
 
-    Mob_all = [ MfromRT(randsp(), randsp()) for _ in xrange(num_sensor-1) ] # other <- base
-    print Mob_all
+    Mba_all = [np.eye(4)]+[ MfromRT(randsp(), randsp()) for _ in xrange(num_sensor-1) ] # other <- base
+    print Mba_all
     dM_1   = [ MfromRT( d2r(10+5*np.random.rand(1))*randsp(), 0.5*np.random.rand(1) * randsp() ) for _ in xrange(num_seg)]
-    dM_all = [dM_1] + [ map(ConjugateM, dM_1, [M21]*num_seg ) for M21 in Mob_all ]
+    dM_all = [ map(ConjugateM, dM_1, [M21]*num_seg ) for M21 in Mba_all ]
 
     M_all  = [ [np.eye(4)] for _ in range(num_sensor)]
     for M_trj, dM_trj in zip(M_all, dM_all):
@@ -455,13 +604,30 @@ if __name__ == '__main__':
     cov_t = np.diag(np.r_[0.01,0.02,0.01]**2)
     fac = []
     for i in range(1):
-      M_all_noisy = [ [np.eye(4)]+[ QTParameterization.FromMwithNoise(M, cov_q, cov_t) for M in trj[1:] ] for trj in M_all ]
+      print "A:"
+#      np.random.seed(1)
+      calp_glb = BatchCalibrationProblem()
+      for i in xrange(num_sensor):
+        calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).Rebase(map(invT,Mba_all)[i]).SimulateNoise()
+      init_guest = {i+1:T_ba for i,T_ba in enumerate(Mba_all[1:])}#{}#
+      problem_glb = calp_glb.MakeProblemWithModelA(0, init_guest)
+      x, Cov_xx, sigma_0, w = problem_glb.Solve()
+#      fac.append(sigma_0)
 
-      print "Abs:"
+      print "B:"
+#      np.random.seed(1)
       calp_abs = BatchCalibrationProblem()
       for i in xrange(num_sensor):
-        calp_abs[i]= AbsTrajectory.FromPoseData( M_all_noisy[i], block_diag(cov_q, cov_t) )
-      init_guest = {}#{i+1:Tob for i,Tob in enumerate(Mob_all)}#
-      problem_abs = calp_abs.MakeProblemWithAbsModel(0, init_guest)
+        calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+      problem_abs = calp_abs.MakeProblemWithModelB(0, init_guest)
       x, Cov_xx, sigma_0, w = problem_abs.Solve()
-      fac.append(sigma_0)
+#      fac.append(sigma_0)
+
+      print "C:"
+#      np.random.seed(1)
+      calp_rel = BatchCalibrationProblem()
+      for i in xrange(num_sensor):
+        calp_rel[i]= RelTrajectory.FromPoseData( dM_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+      problem_rel = calp_rel.MakeProblemWithModelC(0, init_guest)
+      x, Cov_xx, sigma_0, w = problem_rel.Solve()
+#      fac.append(sigma_0)

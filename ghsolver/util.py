@@ -9,7 +9,9 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 
-def check_identity(x):
+d2r = np.deg2rad
+
+def check_unique(x):
   if len(set(x)) != 1:
     raise ValueError("values not identical")
   return x
