@@ -144,7 +144,7 @@ class QuaternionPose(Pose):
     q_b, t_b = ToQt(b.qt)
 
     q = (q_a * q_b).q
-    t = q_a.Rotatepoint(t_b) + t_a
+    t = q_a.RotatePoint(t_b) + t_a
 
     if not a.cov is None and not b.cov is None:
       A = Pose.Adjoint(a.M)
@@ -273,15 +273,15 @@ class RelTrajectory(Trajectory):
     return super(RelTrajectory, cls).FromPoseData(M_list, cov_list, timestamp, QuaternionPose)
 
   def ToAbs(self, M0=np.eye(4) ):
-    PoseClass = type(self.poses[0])
-    pose_list = [PoseClass( M = M0, id = 0, cov = np.zeros(6) )]
+    PoseClass = QuaternionPose #type(self.poses[0])
+    pose_list = [PoseClass.FromM( M = M0, id = 0, cov = np.zeros((6,6)) )]
 
     for dp in self.poses:
       p_last = pose_list[-1]
       if np.array_equal(p_last.M, np.eye(4)): # a hack when r,t=0
-        pose = PoseClass( M = dp.M,
-                     id = len(pose_list),
-                     cov= dp.cov)
+        pose = PoseClass.FromM( M = dp.M,
+                               id = len(pose_list),
+                               cov= dp.cov)
       else:
         pose = QuaternionPose.Plus(p_last, dp)
         pose.id = len(pose_list)
@@ -602,32 +602,40 @@ if __name__ == '__main__':
 
     cov_q = np.diag(np.r_[0.01,0.02,0.03]**2)
     cov_t = np.diag(np.r_[0.01,0.02,0.01]**2)
+    cov = block_diag(cov_q, cov_t)
     fac = []
-    for i in range(1):
-      print "A:"
-#      np.random.seed(1)
-      calp_glb = BatchCalibrationProblem()
-      for i in xrange(num_sensor):
-        calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).Rebase(map(invT,Mba_all)[i]).SimulateNoise()
-      init_guest = {i+1:T_ba for i,T_ba in enumerate(Mba_all[1:])}#{}#
-      problem_glb = calp_glb.MakeProblemWithModelA(0, init_guest)
-      x, Cov_xx, sigma_0, w = problem_glb.Solve()
-#      fac.append(sigma_0)
+    for i in range(1000):
+      if 1:
+        print "A:"
+  #      np.random.seed(1)
+        calp_glb = BatchCalibrationProblem()
+        for i in xrange(num_sensor):
+#          calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], cov ).Rebase(map(invT,Mba_all)[i]).SimulateNoise()
+          calp_glb[i]= RelTrajectory.FromPoseData( dM_all[i], cov ).ToAbs(map(invT,Mba_all)[i]).SimulateNoise()
+        init_guest = {i+1:T_ba for i,T_ba in enumerate(Mba_all[1:])}#{}#
+        problem_glb = calp_glb.MakeProblemWithModelA(0, init_guest)
+        x, Cov_xx, sigma_0, w = problem_glb.Solve()
+        fac.append(sigma_0)
 
-      print "B:"
-#      np.random.seed(1)
-      calp_abs = BatchCalibrationProblem()
-      for i in xrange(num_sensor):
-        calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
-      problem_abs = calp_abs.MakeProblemWithModelB(0, init_guest)
-      x, Cov_xx, sigma_0, w = problem_abs.Solve()
-#      fac.append(sigma_0)
+      if 0:
+        print "B:"
+  #      np.random.seed(1)
+        calp_abs = BatchCalibrationProblem()
+        for i in xrange(num_sensor):
+          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+        problem_abs = calp_abs.MakeProblemWithModelB(0, init_guest)
+        x, Cov_xx, sigma_0, w = problem_abs.Solve()
+  #      fac.append(sigma_0)
 
-      print "C:"
-#      np.random.seed(1)
-      calp_rel = BatchCalibrationProblem()
-      for i in xrange(num_sensor):
-        calp_rel[i]= RelTrajectory.FromPoseData( dM_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
-      problem_rel = calp_rel.MakeProblemWithModelC(0, init_guest)
-      x, Cov_xx, sigma_0, w = problem_rel.Solve()
-#      fac.append(sigma_0)
+      if 0:
+        print "C:"
+  #      np.random.seed(1)
+        calp_rel = BatchCalibrationProblem()
+        for i in xrange(num_sensor):
+          calp_rel[i]= RelTrajectory.FromPoseData( dM_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+        problem_rel = calp_rel.MakeProblemWithModelC(0, init_guest)
+        x, Cov_xx, sigma_0, w = problem_rel.Solve()
+  #      fac.append(sigma_0)
+    plt.clear()
+    plt.hist(fac,20)
+    print np.mean(fac)
