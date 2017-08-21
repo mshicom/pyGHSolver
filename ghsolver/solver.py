@@ -1297,6 +1297,7 @@ class BatchGaussHelmertProblem(object):
       for grp_id, seg, cov in compress( izip(count(), self.slice_dl, obs_covs), self.l_notfixeds):
           Cov_ll[obs_id, seg, seg ] = cov
 
+    is_converged = False
     # 4. solve
     for it in xrange(maxiter):
       Nm[:,:]= 0
@@ -1306,9 +1307,11 @@ class BatchGaussHelmertProblem(object):
       x_arrays = self.x_arrays()
       for obs_id, l_arrays, l_params, l_errs, dl_covs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs(), self.l_covs()):
         # update covariance matrix
-        if update_cov:
+        if update_cov and is_converged:
           for seg, cov, param, dl in compress( izip(self.slice_dl, dl_covs, l_params, l_errs), self.l_notfixeds):
               Cov_ll[obs_id, seg, seg] = param.PlusCov(cov, dl)
+          update_cov = False
+          print "trying with updated cov"
 
         # update Jacobian and residual
         err, J = self.g(* (x_arrays + l_arrays) )
@@ -1352,10 +1355,12 @@ class BatchGaussHelmertProblem(object):
 
       print it, res
 
-      if np.abs(dx).max() < Tx:
+      is_converged = np.abs(dx).max() < Tx
+      if is_converged and not update_cov:
           break
+
     sigma_0 = sum([grp.Cost() for grp in self.l_groups]) / (num_obs * self.dim_err - self.dim_x)
-    print sigma_0
+    print "sigma_0: %f" % sigma_0
     Cov_xx  = np.linalg.pinv(Nm)
     return self.x, Cov_xx, sigma_0, w
 
