@@ -1276,8 +1276,7 @@ class BatchGaussHelmertProblem(object):
       if grp.notfixed:
         grp[obs_id].Plus(dl[seg_dl])
 
-
-  def Solve(self, asGM=False, maxiter=100, Tx=1e-6, weight='none'):
+  def Solve(self, asGM=False, maxiter=100, Tx=1e-6, weight='none', update_cov=False):
     # 1. setup
     self.Setup()
     num_obs = self.num_obs
@@ -1305,7 +1304,12 @@ class BatchGaussHelmertProblem(object):
       res    = 0
       self._UpdateAllPrmJacobian()
       x_arrays = self.x_arrays()
-      for obs_id, l_arrays, l_params, l_errs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs()):
+      for obs_id, l_arrays, l_params, l_errs, dl_covs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs(), self.l_covs()):
+        # update covariance matrix
+        if update_cov:
+          for seg, cov, param, dl in compress( izip(self.slice_dl, dl_covs, l_params, l_errs), self.l_notfixeds):
+              Cov_ll[obs_id, seg, seg] = param.PlusCov(cov, dl)
+
         # update Jacobian and residual
         err, J = self.g(* (x_arrays + l_arrays) )
         vv = np.hstack( compress(l_errs, self.l_notfixeds) )

@@ -35,6 +35,10 @@ class LocalParameterization(object):
     """
     raise NotImplementedError()
 
+  def PlusCov(self, cov_dl0, dl):
+    '''Adjust covariance matrix for multiplicative uncertanty'''
+    return cov_dl0
+
   def UpdateJacobian(self, x):
     self.jacobian = self.ComputeJacobian(x)
 
@@ -45,10 +49,10 @@ class LocalParameterization(object):
     """
     return Jx.dot(self.jacobian)
 
-  def ToGlobalCovariance(self, x, sigma):
-    assert sigma.shape == (self.GlobalSize(),)*2
-    J = self.ComputeJacobian(x)
-    return J.T.dot(sigma).dot(J)
+#  def ToGlobalCovariance(self, x, sigma):
+#    assert sigma.shape == (self.GlobalSize(),)*2
+#    J = self.ComputeJacobian(x)
+#    return J.T.dot(sigma).dot(J)
 
 class IdentityParameterization(LocalParameterization):
   def __init__(self, size):
@@ -103,6 +107,12 @@ class ProductParameterization(LocalParameterization):
     for param, g_slc, l_slc in zip(self.params, self.g_slc, self.l_slc):
       x_new[g_slc] = param.Plus(x[g_slc], delta[l_slc])
     return x_new
+
+  def PlusCov(self, cov_l0, delta):
+    cov_new = np.copy(cov_l0)
+    for param, l_slc in zip(self.params, self.l_slc):
+      cov_new[l_slc, l_slc] = param.PlusCov(cov_l0[l_slc, l_slc], delta[l_slc])
+    return cov_new
 
   def ComputeJacobian(self, x):
     J = [param.ComputeJacobian(x[g_slc]) for param, g_slc in zip(self.params, self.g_slc)]
@@ -943,6 +953,12 @@ class QuaternionParameterization(LocalParameterization):
                           [ x[0],  x[3], -x[2] ],
                           [-x[3],  x[0],  x[1] ],
                           [ x[2], -x[1],  x[0] ] ])
+
+  def PlusCov(self, cov_dl0, dl):
+    '''Adjust covariance matrix for multiplicative uncertanty'''
+    R = Quaternion.FromAngleAxis(dl).ToRot()
+    return R.dot(cov_dl0).dot(R.T)
+
 
 def test_QuaternionParameterization():
 
