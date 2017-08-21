@@ -205,9 +205,12 @@ class Trajectory(object):
   def SimulateNoise(self, cov=None):
     zero = np.zeros(6)
     for p in self.poses:
-      drdt = np.random.multivariate_normal(zero, p.cov if cov is None else cov)
+      if not cov is None:
+        p.cov = cov
+      drdt = np.random.multivariate_normal(zero, p.cov)
       p.r[:] = (Quaternion.FromAngleAxis(drdt[:3]) * Quaternion(p.r)).q
       p.t[:] += drdt[3:]
+
 #      p.ApplyTransform(MfromRT(drdt[:3], drdt[3:]))
     return self
 
@@ -576,13 +579,13 @@ if __name__ == '__main__':
 
   if 1:
     num_sensor = 2
-    num_seg = 100
+    num_seg = 300
     def add_n_noise(sigma):
       return lambda x: x + sigma*np.random.randn(3)
     def add_u_noise(scale):
       return lambda x: x + scale*np.random.rand(3)
     noise_on = 1.0
-#    np.random.seed(20)
+    np.random.seed(20)
 
     ConjugateM = lambda dM1, M21 : M21.dot(dM1).dot(invT(M21))
     def deep_map(function, list_of_list):
@@ -604,38 +607,40 @@ if __name__ == '__main__':
     cov_t = np.diag(np.r_[0.01,0.02,0.01]**2)
     cov = block_diag(cov_q, cov_t)
     fac = []
-    for i in range(1000):
-      if 1:
+    for i in range(100):
+      if 0:
         print "A:"
-  #      np.random.seed(1)
         calp_glb = BatchCalibrationProblem()
         for i in xrange(num_sensor):
-#          calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], cov ).Rebase(map(invT,Mba_all)[i]).SimulateNoise()
-          calp_glb[i]= RelTrajectory.FromPoseData( dM_all[i], cov ).ToAbs(map(invT,Mba_all)[i]).SimulateNoise()
+          if 1:
+            calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(map(invT,Mba_all)[i]).SimulateNoise( cov )
+          else:
+            calp_glb[i]= RelTrajectory.FromPoseData( dM_all[i], None ).SimulateNoise( cov ).ToAbs(map(invT,Mba_all)[i])
         init_guest = {i+1:T_ba for i,T_ba in enumerate(Mba_all[1:])}#{}#
         problem_glb = calp_glb.MakeProblemWithModelA(0, init_guest)
-        x, Cov_xx, sigma_0, w = problem_glb.Solve()
+        x, Cov_xx, sigma_0, w = problem_glb.Solve(update_cov=True)
         fac.append(sigma_0)
 
       if 0:
         print "B:"
-  #      np.random.seed(1)
         calp_abs = BatchCalibrationProblem()
         for i in xrange(num_sensor):
-          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], cov ).SimulateNoise()
         problem_abs = calp_abs.MakeProblemWithModelB(0, init_guest)
         x, Cov_xx, sigma_0, w = problem_abs.Solve()
-  #      fac.append(sigma_0)
+        fac.append(sigma_0)
 
-      if 0:
+      if 1:
         print "C:"
-  #      np.random.seed(1)
         calp_rel = BatchCalibrationProblem()
         for i in xrange(num_sensor):
-          calp_rel[i]= RelTrajectory.FromPoseData( dM_all[i], block_diag(cov_q, cov_t) ).SimulateNoise()
+          if 0:
+            calp_rel[i]= RelTrajectory.FromPoseData( dM_all[i], cov ).SimulateNoise()
+          else:
+            calp_rel[i]= AbsTrajectory.FromPoseData( M_all[i], None ).ToRel().SimulateNoise(cov)
         problem_rel = calp_rel.MakeProblemWithModelC(0, init_guest)
         x, Cov_xx, sigma_0, w = problem_rel.Solve()
-  #      fac.append(sigma_0)
-    plt.clear()
+        fac.append(sigma_0)
+    plt.close()
     plt.hist(fac,20)
     print np.mean(fac)
