@@ -747,10 +747,9 @@ def MfromRT(r,t):
   return T
 
 def MfromQT(q,t):
-  T = np.eye(4)
-  T[:3,:3] = Quaternion(q).ToRot()
-  T[:3, 3] = t
-  return T
+  v = np.array([0,0,0,1.0])
+  R = Quaternion(q).ToRot()
+  return np.vstack([np.hstack([R,t[:,np.newaxis]]), v])
 
 def invT(T):
   R, t = T[:3, :3], T[:3, 3]

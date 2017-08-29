@@ -8,6 +8,7 @@ Created on Wed Aug  9 17:39:38 2017
 import numpy as np
 import pycppad
 from numpy.testing import *
+import matplotlib.pyplot as plt
 
 d2r = np.deg2rad
 
@@ -260,3 +261,44 @@ def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255
     get_vtk_control().RemoveAllActors()
   get_vtk_control().AddActor(pose_actor)
   get_vtk_control().AddActor(line_actor)
+
+#%%
+class Scroller(object):
+  '''
+  1. call_back = f(ax, ind)
+  2. example (a class method)
+  ---------
+  def Plot(self, ax=None, ind=0):
+    if ax is None:
+      num_shots = len(self.snapshots)
+      self._scroller = Scroller(self.Plot, num_shots)
+    else:
+      ax.cla()
+      <do your plot here>
+    return self
+  '''
+  def __init__(self, call_back, slices, ax=None):
+
+    self.call_back = call_back
+    self.slices = slices
+    self.ind = int(0)
+
+    if ax is None:  # create one
+        fig, ax = plt.subplots()
+    self.ax = ax
+    ax.set_title('use scroll wheel to navigate images')
+    ax.figure.canvas.mpl_connect('scroll_event', self.onscroll)
+    self.update()
+
+  def onscroll(self, event):
+    #    print("%s %s" % (event.button, event.step))
+    if event.button == 'up':
+        self.ind = np.clip(self.ind - 1, 0, self.slices - 1)
+    else:
+        self.ind = np.clip(self.ind + 1, 0, self.slices - 1)
+    self.update()
+
+  def update(self):
+    self.call_back(self.ax, self.ind)
+    self.ax.set_title('%d of %d' % (self.ind, self.slices))
+    self.ax.figure.canvas.draw()
