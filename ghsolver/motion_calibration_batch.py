@@ -79,7 +79,13 @@ class Pose(object):
 
   @staticmethod
   def Interpolate(a, b, time):
-    raise NotImplementedError("")
+    ratio = float(time - a.id)/( b.id - a.id)
+    M0, M1 = a.M, b.M
+    dm = SE3.algebra_from_group( M1.dot(invT(M0)) )
+    dM = SE3.group_from_algebra( ratio*dm )
+    Mt = dM.dot(M0)
+    cov_time = (1-ratio)*a.cov + ratio*b.cov
+    return self.FromM(Mt, id=time, cov=cov_time)
 
   @staticmethod
   def Plus(a, b):
@@ -172,6 +178,8 @@ class QuaternionPose(Pose):
   def __repr__(self):
     return "QuaternionPose %s:(%s,%s)" % (self.id, self.r, self.t)
 
+
+
 from bisect import bisect_left
 class Trajectory(object):
   def __init__(self):
@@ -248,21 +256,22 @@ class Trajectory(object):
   def __getitem__(self, key):
     return self.poses[key]
 
-#  def Interpolate(self, sorted_insertion_timestamp):
-#    sorted_timestep = self.id
-#    end = len(self.poses)
-#    i = 0
-#    new_p = []
-#    PoseType = type(self.poses[0])
-#    for other in sorted_insertion_timestamp:
-#      i = bisect_left(sorted_timestep, other, lo=i)  #  a[:i] < x <= a[i:]
-#      if i == 0:
-#        continue
-#      if i == end:
-#        break
-#      p = PoseType.Interpolate(self.poses[i-1], self.poses[i], other)
-#      new_p.append(p)
-#    return self.FromPoseList(new_p)
+  def Interpolate(self, sorted_insertion_timestamp):
+    sorted_timestep = self.id
+    end = len(self.poses)
+    i = 0
+    new_p = []
+    PoseType = type(self.poses[0])
+    for other in sorted_insertion_timestamp:
+      i = bisect_left(sorted_timestep, other, lo=i)  #  a[:i] < x <= a[i:]
+      if i == 0:
+        print("%f skipped" % other)
+        continue
+      if i == end:
+        break
+      p = PoseType.Interpolate(self.poses[i-1], self.poses[i], other)
+      new_p.append(p)
+    return self.FromPoseList(new_p)
 
   def __repr__(self):
     return "Trajectory %s with %d poses " % (self.name, len(self.poses))
@@ -347,7 +356,43 @@ class BatchCalibrationProblem(object):
   def __repr__(self):
     return str(self.trajectory)
 
-  def SolveDirect(self, base, opponent):
+  def SolveAXXBDirect(self, base, opponent):
+    # 1.solve rotation
+    if isinstance(self.trajectory[base][0], QuaternionPose):
+      # method A with quaternion
+      q_a = map(Quaternion, self.trajectory[base].r)
+      q_b = map(Quaternion, self.trajectory[opponent].r)
+      R_b = map(lambda q:q.ToRot(),  q_b)
+
+      H  = [ q.ToMulMatL() - p.ToMulMatR() for q,p in zip(q_b, q_a) ] # L(q_b)*q_ba - R(q_a)*q_ba = 0, st. |q_ba|=1
+      _, s, V = np.linalg.svd(np.vstack( H ), full_matrices=0)
+      q_ba = V[3]   # eigen vector with smallest eigen value
+      R_ba = Quaternion(q_ba).ToRot()
+
+    else:
+      # method B with angle-axis
+      r_a = np.asarray(self.trajectory[base].r)
+      r_b = np.asarray(self.trajectory[opponent].r)
+      R_b = map(ax2Rot, r_b)
+
+      H = r_a.T.dot(r_b)
+      U, d, Vt = np.linalg.svd(H)
+      R_ba = Vt.T.dot(U.T)
+
+    # 2.solve translation given rotation
+    t_a = np.asarray(self.trajectory[base].t)
+    t_b = np.asarray(self.trajectory[opponent].t)
+    I = np.eye(3)
+    A = np.vstack([ I - R for R in R_b])
+    b = np.hstack( t_b - ( R_ba.dot(t_a.T) ).T )
+    t_ba = np.linalg.lstsq(A, b)[0]
+
+    # 3.final result
+    M_ba = np.eye(4)
+    M_ba[:3,:3], M_ba[:3,3] = R_ba, t_ba
+    return M_ba
+
+  def SolveAXYBDirect(self, base, opponent):
     # 1.solve rotation
     if isinstance(self.trajectory[base][0], QuaternionPose):
       # method A with quaternion
@@ -428,7 +473,7 @@ class BatchCalibrationProblem(object):
         M_ba = dict_M_ba[key]
       else:
         raise ValueError("Inital guest must be provided")
-#        M_ba = self.SolveDirect(base, key)
+#        M_ba = self.SolveAXXBDirect(base, key)
 #        print "Init guess for %s:\n%s" %(key, M_ba)
       P_ba = QuaternionPose.FromM(M_ba)
       P_ba.AddToProblemAsParameter(problem, trj.slot-1)
@@ -483,11 +528,69 @@ class BatchCalibrationProblem(object):
       if key in dict_M_ba:
         M_ba = dict_M_ba[key]
       else:
-        M_ba = self.SolveDirect(base, key)
+        M_ba = self.SolveAXXBDirect(base, key)
         print "Init guess for %s:\n%s" %(key, M_ba)
       Pob = QuaternionPose.FromM(M_ba)
       Pob.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = Pob     # other <- base
+      # observation
+      trj.AddPosesToProblemAsObservation(problem, skip_first=True)
+    self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=True)
+    return problem
+
+  def MakeProblemWithModelBB(self, base, dict_M_ba={}):
+    # check
+    check_unique([len(trj) for trj in self.trajectory.values()])
+    for trj in self.trajectory.values():
+      assert isinstance(trj, AbsTrajectory)
+      if not np.allclose( trj[0].M, np.eye(4) ):
+        print 'First pose is not Identity, please use trj.Rebase() to make so.'
+
+    # define constraint function
+    num_sensors = len(self.trajectory)
+    num_x = 2*(num_sensors-1)
+    num_l = num_sensors
+
+    @AddJacobian(split=False)
+    def AbsoluteConstraint(*args):  # Yvw Awa = Bvb Xba
+      # separate parameters and observation from one large args
+      # args = x_args + l_args
+      x_args, y_args, l_args = list(args[:num_x/2]), list(args[num_x/2:num_x]), list(args[num_x:])
+      e = []
+      # base trajectory is the first
+      q_wa, t_wa = ToQt(l_args.pop(0))
+      # loop through trajectory-pair
+      for qt_ba, qt_vw, qt_vb in zip(x_args, y_args, l_args):
+        q_ba, t_ba = ToQt(qt_ba)   # other -> base
+        q_vw, t_vw = ToQt(qt_vw)   # other -> base
+        q_vb, t_vb = ToQt(qt_vb)
+        err_q = ( q_vb * q_ba * q_wa.Inv() * q_vw.Inv() ).q[1:]
+        err_t = q_vb.RotatePoint(t_ba) + t_vb - q_vw.RotatePoint(t_wa) - t_vw
+        e += [err_q, err_t]
+      return np.hstack(e)
+
+    # assign slot
+    self.trajectory[base].slot = 0
+    opp_key = self.trajectory.keys()
+    opp_key.remove(base)
+    for cnt, key in enumerate(opp_key):
+      self.trajectory[key].slot = cnt+1
+
+    problem = BatchGaussHelmertProblem(AbsoluteConstraint, num_x, num_l)
+    for key in opp_key:
+      trj = self.trajectory[key]
+      # parameter, get init guess
+      if key in dict_M_ba:
+        M_ba, M_vw = dict_M_ba[key]
+      else:
+        M_ba, M_vw = self.SolveAXYBDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, M_ba)
+      Pba = QuaternionPose.FromM(M_ba)
+      Pba.AddToProblemAsParameter(problem, trj.slot-1)
+      Pvw = QuaternionPose.FromM(M_vw)
+      Pvw.AddToProblemAsParameter(problem, num_x/2+trj.slot-1)
+
+      self.calibration[key][base] = Pba     # other <- base
       # observation
       trj.AddPosesToProblemAsObservation(problem, skip_first=True)
     self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=True)
@@ -534,7 +637,7 @@ class BatchCalibrationProblem(object):
       if key in dict_M_ba:
         M_ba = dict_M_ba[key]
       else:
-        M_ba = self.SolveDirect(base, key)
+        M_ba = self.SolveAXXBDirect(base, key)
         print "Init guess for %s:\n%s" %(key, M_ba)
       P_ba = QuaternionPose.FromM(M_ba)
       P_ba.AddToProblemAsParameter(problem, trj.slot-1)
@@ -603,6 +706,8 @@ if __name__ == '__main__':
       for dM in dM_trj:
         M_trj.append( M_trj[-1].dot( dM ) )
 
+    Mvw_all = [np.eye(4)]+[ MfromRT(randsp(), randsp()) for _ in xrange(num_sensor-1) ] # other <- base
+
     cov_q = np.diag(np.r_[0.01,0.02,0.03]**2)
     cov_t = np.diag(np.r_[0.01,0.02,0.01]**2)
     cov = block_diag(cov_q, cov_t)
@@ -613,7 +718,7 @@ if __name__ == '__main__':
         calp_glb = BatchCalibrationProblem()
         for i in xrange(num_sensor):
           if 1:
-            calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(map(invT,Mba_all)[i]).SimulateNoise( cov )
+            calp_glb[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(invT(Mba_all[i])).SimulateNoise( cov )
           else:
             calp_glb[i]= RelTrajectory.FromPoseData( dM_all[i], None ).SimulateNoise( cov ).ToAbs(map(invT,Mba_all)[i])
         init_guest = {i+1:T_ba for i,T_ba in enumerate(Mba_all[1:])}#{}#
@@ -631,6 +736,15 @@ if __name__ == '__main__':
         fac.append(sigma_0)
 
       if 1:
+        print "BB:"
+        calp_abs = BatchCalibrationProblem()
+        for i in xrange(num_sensor):
+          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(invT(Mvw_all[i]))#.SimulateNoise(cov)
+        problem_abs = calp_abs.MakeProblemWithModelBB(0, {i+1:(T_ba, T_vw) for i,T_ba,T_vw in zip(count(), Mba_all[1:], Mvw_all[1:] )})
+        x, Cov_xx, sigma_0, w = problem_abs.Solve()
+        fac.append(sigma_0)
+
+      if 0:
         print "C:"
         calp_rel = BatchCalibrationProblem()
         for i in xrange(num_sensor):

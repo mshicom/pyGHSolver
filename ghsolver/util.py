@@ -9,7 +9,6 @@ import numpy as np
 import pycppad
 from numpy.testing import *
 import matplotlib.pyplot as plt
-
 d2r = np.deg2rad
 
 def check_unique(x):
@@ -145,11 +144,11 @@ from vtk_visualizer import get_vtk_control
 import vtk
 from vtk.util import numpy_support
 
-def PlotAxes(pose, length=1, hold=True):
+def PlotAxes(pose, scale=1, hold=True):
     "Create a coordinate axes system with a given length of the axes"
     axesActor = vtk.vtkAxesActor()
     axesActor.AxisLabelsOff()
-    axesActor.SetTotalLength(length, length, length)
+    axesActor.SetTotalLength(scale, scale, scale)
     m = vtk.vtkMatrix4x4()
     m.DeepCopy(np.ravel(pose).tolist())
     axesActor.SetUserMatrix(m)
@@ -187,7 +186,7 @@ _axes_pd = AxesPolyData()
 
 def PlotPose(pose, scale=1, inv=False, base=None, hold=False, color=(255,255,255)):
   if inv:
-    pose = map(invT, pose)
+    pose = map(np.linalg.inv, pose)
   if not base is None:
     pose = map(lambda p:np.dot(base,p), pose )
 

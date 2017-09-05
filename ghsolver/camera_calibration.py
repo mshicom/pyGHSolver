@@ -307,7 +307,7 @@ if __name__ == '__main__':
         # Draw and display the corners
         cv2.drawChessboardCorners(img, (8,6), corners,ret)
         cv2.imshow('img',img)
-        cv2.waitKey(500)
+        cv2.waitKey(5)
       else:
         print("image %s failed"% fname)
     cv2.destroyAllWindows()
@@ -325,6 +325,7 @@ if __name__ == '__main__':
     problem = cal.BuildProblem(fix_f=False, fix_dist=False)
     x, lc = SolveWithGESparse(problem)
     problem.UpdateXL()
+
     cam1.Plot()
     cam1.Save(base_path+"bumblebee_11123872_left.pkl")
 

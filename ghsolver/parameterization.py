@@ -753,15 +753,8 @@ def MfromQT(q,t):
 
 def invT(T):
   R, t = T[:3, :3], T[:3, 3]
-
-  if T.dtype==object:
-    Ti = pycppad.a_float(1) * np.eye(4, dtype='d')
-  else:
-    Ti = np.eye(4, dtype='d')
-
-  Ti[:3, :3] = R.T
-  Ti[:3, 3]  = -R.T.dot(t)
-  return Ti
+  return np.vstack([np.hstack([ R.T, -R.T.dot(t)[:,np.newaxis] ]),
+                     np.array([0, 0, 0, 1.0])])
 
 AngleAxisParameterization = MakeParameterization(
                               lambda x,delta: axAdd(delta,x),
