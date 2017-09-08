@@ -84,8 +84,8 @@ class Pose(object):
     dm = SE3.algebra_from_group( M1.dot(invT(M0)) )
     dM = SE3.group_from_algebra( ratio*dm )
     Mt = dM.dot(M0)
-    cov_time = (1-ratio)*a.cov + ratio*b.cov
-    return self.FromM(Mt, id=time, cov=cov_time)
+    cov_time = a.cov if ratio<0.5 else  b.cov
+    return type(a).FromM(Mt, id=time, cov=cov_time)
 
   @staticmethod
   def Plus(a, b):
@@ -256,7 +256,7 @@ class Trajectory(object):
   def __getitem__(self, key):
     return self.poses[key]
 
-  def Interpolate(self, sorted_insertion_timestamp):
+  def Interpolate(self, sorted_insertion_timestamp, mask=True):
     sorted_timestep = self.id
     end = len(self.poses)
     i = 0
@@ -356,6 +356,33 @@ class BatchCalibrationProblem(object):
   def __repr__(self):
     return str(self.trajectory)
 
+  def SolveAXBDirect(self, base, opponent):
+    ''' solve Awa = Bwb Xba '''
+    # 1.solve rotation
+    if isinstance(self.trajectory[base][0], QuaternionPose):
+      # method A with quaternion
+      q_a = map(Quaternion, self.trajectory[base].r)
+      q_b = map(Quaternion, self.trajectory[opponent].r)
+
+      H  = [ ( p.Inv() * q).ToMulMatL()[1:,:] for q,p in zip(q_b, q_a) ] # L(q_b)*q_ba - q_a = 0, st. |q_ba|=1
+      _, s, V = np.linalg.svd( np.vstack(H) , full_matrices=0)
+      q_ba = V[3]   # eigen vector with smallest eigen value
+      R_ba = Quaternion(q_ba).ToRot()
+    else:
+      raise ValueError('Only QuaternionPose supported')
+
+    # 2.solve translation given rotation, ta = Rb x + tb
+    t_a = np.asarray(self.trajectory[base].t)
+    t_b = np.asarray(self.trajectory[opponent].t)
+    b = np.ravel( t_a - t_b )
+    A = np.vstack([ q.ToRot() for q in q_b])
+    t_ba = np.linalg.lstsq(A, b)[0]
+
+    # 3.final result
+    M_ba = np.eye(4)
+    M_ba[:3,:3], M_ba[:3,3] = R_ba, t_ba
+    return M_ba
+
   def SolveAXXBDirect(self, base, opponent):
     # 1.solve rotation
     if isinstance(self.trajectory[base][0], QuaternionPose):
@@ -366,7 +393,7 @@ class BatchCalibrationProblem(object):
 
       H  = [ q.ToMulMatL() - p.ToMulMatR() for q,p in zip(q_b, q_a) ] # L(q_b)*q_ba - R(q_a)*q_ba = 0, st. |q_ba|=1
       _, s, V = np.linalg.svd(np.vstack( H ), full_matrices=0)
-      q_ba = V[3]   # eigen vector with smallest eigen value
+      q_ba = V[-1]   # eigen vector with smallest eigen value
       R_ba = Quaternion(q_ba).ToRot()
 
     else:
@@ -472,9 +499,8 @@ class BatchCalibrationProblem(object):
       if key in dict_M_ba:
         M_ba = dict_M_ba[key]
       else:
-        raise ValueError("Inital guest must be provided")
-#        M_ba = self.SolveAXXBDirect(base, key)
-#        print "Init guess for %s:\n%s" %(key, M_ba)
+        M_ba = self.SolveAXBDirect(base, key)
+        print "Init guess for %s:\n%s" %(key, M_ba)
       P_ba = QuaternionPose.FromM(M_ba)
       P_ba.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = P_ba     # other <- base
