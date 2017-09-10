@@ -41,6 +41,7 @@ class LocalParameterization(object):
 
   def UpdateJacobian(self, x):
     self.jacobian = self.ComputeJacobian(x)
+    return self.jacobian
 
   def ToLocalJacobian(self, Jx):
     """ Return J_delta given J_x.
@@ -76,7 +77,7 @@ class IdentityParameterization(LocalParameterization):
     return Jx
 
   def UpdateJacobian(self, x):
-    pass
+    return self.jacobian
 
 def replace_none_or_check_param(param, dim):
   if param is None:
@@ -115,7 +116,7 @@ class ProductParameterization(LocalParameterization):
     return cov_new
 
   def ComputeJacobian(self, x):
-    J = [param.ComputeJacobian(x[g_slc]) for param, g_slc in zip(self.params, self.g_slc)]
+    J = [param.UpdateJacobian(x[g_slc]) for param, g_slc in zip(self.params, self.g_slc) if param.LocalSize()>0]#
     return scipy.linalg.block_diag( *J )
 
   def GlobalSize(self):
@@ -123,6 +124,15 @@ class ProductParameterization(LocalParameterization):
 
   def LocalSize(self):
     return self.local_size
+
+  def ToLocalJacobian(self, Jx):
+    """ Return J_delta given J_x.
+        Acording to the Chain Rule of differentiation,
+          J_delta = f'(x) * Plus'(x) =  Jx * jacobian
+    """
+    J = [param.ToLocalJacobian(Jx[:, g_slc]) for param, g_slc in zip(self.params, self.g_slc) if param.LocalSize()>0]#
+    return np.hstack( J )
+
 
 def test_ProductParameterization():
   par = ProductParameterization(IdentityParameterization(2), IdentityParameterization(3))
@@ -158,7 +168,7 @@ class SubsetParameterization(LocalParameterization):
     return self.jacobian
 
   def UpdateJacobian(self, x):
-    pass
+    return self.jacobian
 
   def ToLocalJacobian(self, Jx):
     return np.compress(self.active_mask, Jx, axis=1)  # = Jx[:, self.active_indice]
@@ -195,7 +205,7 @@ class ConstantParameterization(LocalParameterization):
     return np.array([]).reshape(np.shape(Jx)[0], 0)
 
   def UpdateJacobian(self, x):
-    pass
+    return self.empty
 
 
 #%% AutoDiffLocalParameterization
