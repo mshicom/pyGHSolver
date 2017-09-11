@@ -24,8 +24,17 @@ from geometry import  SE3
 from scipy.linalg import block_diag
 
 class QTParameterization(ProductParameterization):
-  def __init__(self):
-    super(QTParameterization, self).__init__(QuaternionParameterization(), IdentityParameterization(3))
+  def __init__(self, fix_rot=False, fix_x=False,fix_y=False,fix_z=False):
+    if fix_rot:
+      rot_param = ConstantParameterization(4)
+    else:
+      rot_param = QuaternionParameterization()
+
+    if fix_x or fix_y or fix_z:
+      trs_param = SubsetParameterization([not fix_x, not fix_y, not fix_z])
+    else:
+      trs_param = IdentityParameterization(3)
+    super(QTParameterization, self).__init__(rot_param, trs_param)
 
   @staticmethod
   def ToQt(x):
@@ -128,12 +137,25 @@ class QuaternionPose(Pose):
     self.qt[:] = np.hstack([qFromM(M_new), tFromM(M_new)])
     return self
 
-  def AddToProblemAsObservation(self, problem, slot):
-    self.param_id, self.err = problem.AddObservation(slot, self.param, self.cov, QTParameterization())
+  def AddToProblemAsObservation(self, problem, slot, fix_rot=False, fix_x=False,fix_y=False,fix_z=False):
+    cov = self.cov
+    if fix_rot:
+      cov = np.delete(cov, [0,1,2],  axis=0)
+      cov = np.delete(cov, [0,1,2],  axis=1)
+    if fix_x:
+      cov = np.delete(cov, -3,  axis=0)
+      cov = np.delete(cov, -3,  axis=1)
+    if fix_y:
+      cov = np.delete(cov, -2,  axis=0)
+      cov = np.delete(cov, -2,  axis=1)
+    if fix_z:
+      cov = np.delete(cov, -1,  axis=0)
+      cov = np.delete(cov, -1,  axis=1)
+    self.param_id, self.err = problem.AddObservation(slot, self.param, cov, QTParameterization(fix_rot, fix_x,fix_y,fix_z))
     return self
 
-  def AddToProblemAsParameter(self, problem, slot):
-    problem.SetParameter(slot, self.param, QTParameterization())
+  def AddToProblemAsParameter(self, problem, slot, *args):
+    problem.SetParameter(slot, self.param, QTParameterization(*args))
     return self
 
   @property
@@ -186,6 +208,8 @@ class Trajectory(object):
     self.name = "none"
     self.poses = []
     self.slot = -1
+    self.fix_rot = False
+    self.fix_x,self.fix_y,self.fix_z = [False]*3
 
   @classmethod
   def FromPoseData(cls, M_list, cov_list, timestamp=None, pose_class=QuaternionPose):
@@ -226,7 +250,9 @@ class Trajectory(object):
     assert self.slot != -1
     start = 1 if skip_first else 0
     for p in self.poses[start:]:
-      p.AddToProblemAsObservation(problem, self.slot)
+      p.AddToProblemAsObservation(problem, self.slot,
+                                  self.fix_rot,
+                                  self.fix_x, self.fix_y, self.fix_z)
 
   def CollectError(self):
     err = np.vstack([p.err for p in self.poses if p.param_id ])
@@ -564,13 +590,13 @@ class BatchCalibrationProblem(object):
     self.trajectory[base].AddPosesToProblemAsObservation(problem, skip_first=True)
     return problem
 
-  def MakeProblemWithModelBB(self, base, dict_M_ba={}):
+  def MakeProblemWithModelBB(self, base, dict_M_ba={}, fix_rot=False, fix_x=False,fix_y=False,fix_z=False):
     # check
     check_unique([len(trj) for trj in self.trajectory.values()])
     for trj in self.trajectory.values():
       assert isinstance(trj, AbsTrajectory)
-      if not np.allclose( trj[0].M, np.eye(4) ):
-        print 'First pose is not Identity, please use trj.Rebase() to make so.'
+#      if not np.allclose( trj[0].M, np.eye(4) ):
+#        print 'First pose is not Identity, please use trj.Rebase() to make so.'
 
     # define constraint function
     num_sensors = len(self.trajectory)
@@ -612,9 +638,9 @@ class BatchCalibrationProblem(object):
         M_ba, M_vw = self.SolveAXYBDirect(base, key)
         print "Init guess for %s:\n%s" %(key, M_ba)
       Pba = QuaternionPose.FromM(M_ba)
-      Pba.AddToProblemAsParameter(problem, trj.slot-1)
+      Pba.AddToProblemAsParameter(problem, trj.slot-1, fix_rot, fix_x,fix_y,fix_z)
       Pvw = QuaternionPose.FromM(M_vw)
-      Pvw.AddToProblemAsParameter(problem, num_x/2+trj.slot-1)
+      Pvw.AddToProblemAsParameter(problem, num_x/2+trj.slot-1, fix_rot, fix_x, fix_y, fix_z)
 
       self.calibration[key][base] = Pba     # other <- base
       # observation
@@ -765,7 +791,7 @@ if __name__ == '__main__':
         print "BB:"
         calp_abs = BatchCalibrationProblem()
         for i in xrange(num_sensor):
-          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(invT(Mvw_all[i]))#.SimulateNoise(cov)
+          calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(Mvw_all[i].dot(invT(Mba_all[i]))).SimulateNoise(cov)
         problem_abs = calp_abs.MakeProblemWithModelBB(0, {i+1:(T_ba, T_vw) for i,T_ba,T_vw in zip(count(), Mba_all[1:], Mvw_all[1:] )})
         x, Cov_xx, sigma_0, w = problem_abs.Solve()
         fac.append(sigma_0)
