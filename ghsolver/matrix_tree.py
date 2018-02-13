@@ -166,7 +166,7 @@ class DenseMatrix(MatrixTreeNode):
     self.shape = shape
     if self.elements:
       del self.elements[:]
-    for seq in xrange(shape[1]):
+    for seq in range(shape[1]):
       self.AddElement(DenseMatrixSegment(self, 0, seq, shape[0]))
 
     self.buf = np.empty(self.shape, order='F').T
@@ -207,7 +207,7 @@ class DiagonalMatrix(DenseMatrix):  # inherit from DenseMatrix, so that the gath
 
   def InitElement(self, shape):
     self.shape = shape
-    for seq in xrange(shape[0]):
+    for seq in range(shape[0]):
       self.AddElement(DenseMatrixSegment(self, seq, seq, 1))
     self.buf = np.empty((shape[0],1))
 
@@ -363,7 +363,7 @@ def test_MatrixTreeNode():
                      [ 0.,  0.,  0.,  2.,  0.,  0.],
                      [ 0.,  0.,  0.,  0.,  2.,  0.],
                      [ 0.,  0.,  0.,  0.,  0.,  2.]])
-  print "test_MatrixTreeNode passed"
+  print( "test_MatrixTreeNode passed")
 
 #%%
 
@@ -449,7 +449,7 @@ def test_MakeSymmetric():
                      [ 1.,  1.,  1.,  1.,  0.,  3.],
                      [ 0.,  0.,  0.,  0.,  0.,  0.],
                      [ 3.,  3.,  3.,  3.,  0.,  0.]])
-  print "test_MakeSymmetric passed"
+  print( "test_MakeSymmetric passed")
 #%%
 from collections import defaultdict,OrderedDict
 def MakeAB(A, B, r=0, c=0):
@@ -469,7 +469,7 @@ def MakeAB(A, B, r=0, c=0):
       else:
         raise RuntimeError("called by wrong object")
       # 2. do calculation once all data are ready
-      if not np.any( [op is None for op in op_a.values()+op_b.values()] ):
+      if not np.any( [op is None for op in chain(op_a.values(),op_b.values())] ):
         new_data = np.zeros(dst_block_shape)
         for mat_a, mat_b in zip(op_a.values(), op_b.values()):
           new_data += mat_a.dot(mat_b)
@@ -563,7 +563,7 @@ def test_MakeAB():
                     [[  3.,  16.,  16.,   9.,   9.,   9.],
                      [  3.,  16.,  16.,   9.,   9.,   9.],
                      [  3.,  16.,  16.,   9.,   9.,   9.]])
-  print "test_MakeAB passed "
+  print( "test_MakeAB passed ")
 
 
 def MakeAWAT(A, W, make_full=True, r=0, c=0):
@@ -583,7 +583,7 @@ def MakeAWAT(A, W, make_full=True, r=0, c=0):
         raise RuntimeError("called by wrong object")
       # 2. do calculation once all data are ready
       if not np.any( [op is None for op in chain(op_a.values(),op_w.values())] ):
-  #      print "All element collected"
+  #      print( "All element collected")
         new_data = np.zeros(dst_block_shape)
         for mat_a, mat_w in zip(op_a.values(), op_w.values()):
           new_data += mat_a.dot(mat_w).dot(mat_a.T)
@@ -612,7 +612,7 @@ def MakeAWAT(A, W, make_full=True, r=0, c=0):
         raise RuntimeError("called by wrong object")
       # 2. do calculation once all data are ready
       if not np.any( [op is None for op in chain(op_a.values(),op_b.values(),op_w.values())] ):
-  #      print "All element collected"
+  #      print( "All element collected")
         new_data = np.zeros(dst_block_shape)
         for mat_a, mat_b, mat_w in zip(op_a.values(), op_b.values(),op_w.values()):
           new_data += mat_a.dot(mat_w).dot(mat_b.T)
@@ -724,7 +724,7 @@ def test_MakeAWAT():
                     [[ 146.,  146.,  146.],
                      [ 146.,  146.,  146.],
                      [ 146.,  146.,  146.]])
-  print "test_MakeAWAT passed"
+  print( "test_MakeAWAT passed")
 
 def MakeBlockInv(other):
   def _make_inv_callback(dst_block):

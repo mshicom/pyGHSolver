@@ -45,7 +45,7 @@ def test_ArrayID():
   assert len( { ArrayID(a[0, :5]), ArrayID(a[0, 1:5]) } ) == 2   # diff length, same end
   s = np.empty(1)
   assert len( { ArrayID(s), ArrayID(s) } ) == 1       # scalar
-  print "test_ArrayID passed"
+  print("test_ArrayID passed")
 
 class CompoundVector(object):
   def __init__(self, capacity=100000):
@@ -91,7 +91,7 @@ class CompoundVectorWithDict(CompoundVector):
     return  self.array_dict.get(key, (None,None))
 
   def OverWriteOrigin(self):
-    for dst, seg in self.array_dict.iteritems():
+    for dst, seg in self.array_dict.items():
       dst.data[:] = seg.array
 
 class CompoundVectorWithMapping(CompoundVector):
@@ -120,7 +120,7 @@ def test_CompoundVector():
   vs = np.random.rand(4,4)
   # main function
   cv = CompoundVectorWithDict()
-  offset,seg = zip(*[cv.AddVector(v) for v in vs])[:2]
+  offset,seg = list(zip(*[cv.AddVector(v) for v in vs]))[:2]
   assert_array_equal(cv.flat, vs.ravel())
   assert_equal(offset, [0,4,8,12])
 
@@ -138,7 +138,7 @@ def test_CompoundVector():
   assert_equal( vs.ravel(), np.hstack( [np.zeros(4), np.ones(4*3) ]) )
 
   # add duplcate vector
-  offset2 = zip(*[cv.AddVector(v) for v in vs])[0]
+  offset2 = list(zip(*[cv.AddVector(v) for v in vs]))[0]
   assert_equal(offset, offset2)
   offset3 = cv.AddVector(  np.empty(1)  )[0]
   assert offset3 == 16
@@ -157,7 +157,7 @@ def test_CompoundVector():
   cvm.Flush()
   assert_array_equal(cv.flat, np.r_[np.ones(4), np.full(12, 2.0)])
 
-  print "test_CompoundVector passed"
+  print("test_CompoundVector passed")
 
 
 #%% GaussHelmertProblem
@@ -581,10 +581,10 @@ def DiagonalRepeat(M, repeats):
   return scipy.linalg.block_diag(* (M,)*repeats )
 
 def VerticalRepeat(M, repeats):
-  return np.tile( M, (repeats,1) )
+  return np.tile( M, (int(repeats),1) )
 
 def HorizontalRepeat(M, repeats):
-  return np.tile( M, (1, repeats) )
+  return np.tile( M, (1, int(repeats)) )
 
 def test_ProblemBasic():
   dim_x, num_x = 3, 2
@@ -596,11 +596,11 @@ def test_ProblemBasic():
   AffineConstraint, AffineConstraintJac = MakeAffineConstraint(A,B)
 
   x = np.zeros((num_x, dim_x))
-  l = [ np.ones((num_l/num_x, dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
+  l = [ np.ones((int(num_l/num_x), dim_l)) for _ in range(num_x) ] # l[which_x] = vstack(l[which_l])
   sigma = np.full(dim_l, 0.5)
   problem = GaussHelmertProblem()
   for i in range(num_x):
-    for j in range(num_l/num_x):
+    for j in range(int(num_l/num_x)):
       problem.AddConstraintWithArray(AffineConstraint,
                                      [ x[i] ],
                                      [ l[i][j] ])
@@ -649,7 +649,7 @@ def test_ProblemBasic():
   problem2 = GaussHelmertProblem()
   for i in range(num_x):
     xid, _ = problem2.AddParameter([ x[i] ])
-    for j in range(num_l/num_x):
+    for j in range(int(num_l/num_x)):
       lid, _ = problem2.AddObservation([ l[i][j] ])
       problem2.AddConstraintWithID(AffineConstraint,
                                    xid,
@@ -660,7 +660,7 @@ def test_ProblemBasic():
   problem2.UpdateJacobian()
   assert_array_equal( Jx2.A, DiagonalRepeat( VerticalRepeat(A, num_l/num_x), num_x) )
   assert_array_equal( Jl2.A, DiagonalRepeat(B, num_l) )
-  print "test_ProblemBasic passed"
+  print("test_ProblemBasic passed")
 
 
 def test_ProblemMakeKKT():
@@ -701,7 +701,7 @@ def test_ProblemMakeKKT():
                      [ 3. ,  0. ,  0. ],
                      [ 4. ,  0. ,  0. ]])
   assert_equal(15, res)
-  print "test_ProblemMakeKKT passed"
+  print("test_ProblemMakeKKT passed")
 def test_FixAndParameterization():
 
   x = np.ones((2, 3))
@@ -734,7 +734,7 @@ def test_FixAndParameterization():
   # SubsetParameterization
   assert_array_almost_equal(x_est[3:6], x2_true)
   assert_array_almost_equal(l[1], VerticalRepeat(x2_true,100))
-  print "test_FixAndParameterization passed"
+  print("test_FixAndParameterization passed")
 
 from cvxopt import matrix,spmatrix
 from cvxopt import solvers
@@ -753,7 +753,7 @@ def SolveWithCVX(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
     problem.UpdateJacobian()
     problem.UpdateResidual()
 
-    print np.linalg.norm(res),np.linalg.norm(le)
+    print( np.linalg.norm(res),np.linalg.norm(le))
 
     P   = spmatrix(BSBT.data, BSBT.row, BSBT.col)
     q   = matrix(res - B*le)
@@ -766,7 +766,7 @@ def SolveWithCVX(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
       problem.Plus(dx, dl)
       le   += dl
     except:
-      print "Singular problem"
+      print("Singular problem")
       break
     if np.abs(dx).max() < dx_thres:
       break
@@ -775,7 +775,7 @@ def SolveWithCVX(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   ret = [xc, le]
   if fac:
     factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-    print 'variance factor:%f' % factor
+    print( 'variance factor:%f' % factor)
     ret.append(factor)
   if cov:
     Wgg   = np.linalg.inv(BSBT.A)
@@ -798,7 +798,7 @@ def SolveWithGEDense(problem, fac=False, cov=False):
     problem.UpdateJacobian()
     problem.UpdateResidual()
 
-    print np.linalg.norm(res),np.linalg.norm(le)
+    print( np.linalg.norm(res),np.linalg.norm(le))
     Wgg = np.linalg.inv(BSBT.A)
     Cg  = B * le - res
     ATW = (Wgg * A).T
@@ -814,7 +814,7 @@ def SolveWithGEDense(problem, fac=False, cov=False):
 
   ret = [xc, le]
   factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-  print 'variance factor:%f' % factor
+  print( 'variance factor:%f' % factor)
   if fac:
     ret.append(factor)
 
@@ -843,7 +843,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   for it in range(maxit):
     problem.UpdateJacobian()
     problem.UpdateResidual()
-    print np.linalg.norm(res),np.linalg.norm(le)
+    print( np.linalg.norm(res),np.linalg.norm(le))
     Cg  = B * le - res
 
     if Sgg_factor is None:
@@ -870,7 +870,7 @@ def SolveWithGESparse(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
   problem.cv_le.flat[:] = le
   ret = [xc, le]
   factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-  print 'variance factor:%f' % factor
+  print( 'variance factor:%f' % factor)
 
   if fac:
     ret.append(factor)
@@ -899,7 +899,7 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
   for it in range(maxit):
     problem.UpdateJacobian()
     problem.UpdateResidual()
-    print np.linalg.norm(res)
+    print( np.linalg.norm(res))
     Cg  = - res
 
     F = Sgg_factor.solve_A(A)   # W * A = F -->> A = BSBT * F
@@ -916,7 +916,7 @@ def SolveWithGESparseAsGM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6
 
   ret = [xc, res]
   factor = res.dot( Sgg_factor.solve_A(res) ) / (problem.dim_res - problem.dim_dx)
-  print 'variance factor:%f' % factor
+  print( 'variance factor:%f' % factor)
   if fac:
     ret.append(factor)
   if cov:
@@ -973,7 +973,7 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 
   for it in range(maxit):
 
-    print np.linalg.norm(res),np.linalg.norm(le)
+    print( np.linalg.norm(res),np.linalg.norm(le))
     Cg  = B * le - res
 
     # solve
@@ -1014,11 +1014,11 @@ def SolveWithGESparseLM(problem, maxit=10, fac=False, cov=False, dx_thres=1e-6):
 
       mu = mu * nu
       nu = 2*nu
-      print mu
+      print( mu)
 
   ret = [xc, le]
   factor = (le * W).dot(le) / (problem.dim_res - problem.dim_dx)
-  print 'variance factor:%f' % factor
+  print( 'variance factor:%f' % factor)
   if fac:
     ret.append(factor)
   if cov:
@@ -1090,7 +1090,7 @@ _robust_func = { 'none'        : lambda y : np.ones_like(y) ,
                  'exp_2'       : lambda y : np.exp(-0.5*y**2/4),    }# np.exp(-0.5*y**2/c**2), c=2}
 
 from collections import  namedtuple
-from itertools import izip, count, compress
+from itertools import count, compress
 class BatchGaussHelmertProblem(object):
   class Observation(object):
     __slots__ = "array","param","cov","err"
@@ -1119,7 +1119,7 @@ class BatchGaussHelmertProblem(object):
       self.err += delta
 
     def Cost(self):
-      W = np.linalg.inv( self.cov )
+      W = np.linalg.pinv( self.cov )
       return self.err.dot( W ).dot(self.err)
 
     def ClearErr(self):
@@ -1184,7 +1184,7 @@ class BatchGaussHelmertProblem(object):
     # prelocated space
     self.x        = [None]*num_x_arg
     self.x_params = [None]*num_x_arg
-    self.l_groups = [ BatchGaussHelmertProblem.ObservationGroup() for _ in xrange(num_l_arg)]
+    self.l_groups = [ BatchGaussHelmertProblem.ObservationGroup() for _ in range(num_l_arg)]
 
     self.num_l_arg = num_l_arg
     self.num_x_arg = num_x_arg
@@ -1192,13 +1192,13 @@ class BatchGaussHelmertProblem(object):
   def x_arrays(self):
     return tuple(self.x)
   def l_arrays(self):
-    return izip(* (group.arrays() for group in self.l_groups) )
+    return zip(* (group.arrays() for group in self.l_groups) )
   def l_params(self):
-    return izip(* (group.params() for group in self.l_groups) )
+    return zip(* (group.params() for group in self.l_groups) )
   def l_covs(self):
-    return izip(* (group.covs() for group in self.l_groups) )
+    return zip(* (group.covs() for group in self.l_groups) )
   def l_errs(self):
-    return izip(* (group.errs() for group in self.l_groups) )
+    return zip(* (group.errs() for group in self.l_groups) )
 
   def SetParameter(self, slot, array, param=None):
     # check
@@ -1261,7 +1261,7 @@ class BatchGaussHelmertProblem(object):
         grp.ClearErr()
 
   def _UpdateAllPrmJacobian(self):
-    for x, param in izip(self.x, self.x_params):
+    for x, param in zip(self.x, self.x_params):
       param.UpdateJacobian(x)
     for grp in self.l_groups:
       if grp.notfixed:
@@ -1294,24 +1294,24 @@ class BatchGaussHelmertProblem(object):
     # 3.fill the big covarince matrix
     Cov_ll=np.zeros( (num_obs,) + (self.dim_dl, self.dim_dl) )
     for obs_id, obs_covs in enumerate(self.l_covs()):
-      for grp_id, seg, cov in compress( izip(count(), self.slice_dl, obs_covs), self.l_notfixeds):
+      for grp_id, seg, cov in compress( zip(count(), self.slice_dl, obs_covs), self.l_notfixeds):
           Cov_ll[obs_id, seg, seg ] = cov
 
     is_converged = False
     # 4. solve
-    for it in xrange(maxiter):
+    for it in range(maxiter):
       Nm[:,:]= 0
       nv[:]  = 0
       res    = 0
       self._UpdateAllPrmJacobian()
       x_arrays = self.x_arrays()
-      for obs_id, l_arrays, l_params, l_errs, dl_covs in izip(count(), self.l_arrays(), self.l_params(), self.l_errs(), self.l_covs()):
+      for obs_id, l_arrays, l_params, l_errs, dl_covs in zip(count(), self.l_arrays(), self.l_params(), self.l_errs(), self.l_covs()):
         # update covariance matrix
         if update_cov and is_converged:
-          for seg, cov, param, dl in compress( izip(self.slice_dl, dl_covs, l_params, l_errs), self.l_notfixeds):
+          for seg, cov, param, dl in compress( zip(self.slice_dl, dl_covs, l_params, l_errs), self.l_notfixeds):
               Cov_ll[obs_id, seg, seg] = param.PlusCov(cov, dl)
           update_cov = False
-          print "trying with updated cov"
+          print("trying with updated cov")
 
         # update Jacobian and residual
         err, J = self.g(* (x_arrays + l_arrays) )
@@ -1336,7 +1336,7 @@ class BatchGaussHelmertProblem(object):
       w = f_w( X_gg/sigma_gg )
 
       # normal equation with modified weight
-      for obs_id in xrange(num_obs):
+      for obs_id in range(num_obs):
         ATBWB = Am[obs_id].T.dot(w[obs_id]*W_gg[obs_id])
         Nm  += ATBWB.dot(Am[obs_id])
         nv  += ATBWB.dot(Cg[obs_id])
@@ -1353,15 +1353,15 @@ class BatchGaussHelmertProblem(object):
           dl = -Cov_ll[obs_id].dot( Bm[obs_id].T.dot(lamba) ) - vv
           self._Plus_dl(obs_id, dl)
 
-      print it, res
+      print( it, res)
 
       is_converged = np.abs(dx).max() < Tx
       if is_converged and not update_cov:
           break
 
     sigma_0 = sum([grp.Cost() for grp in self.l_groups]) / (num_obs * self.dim_err - self.dim_x)
-    print "sigma_0: %f" % sigma_0
-    Cov_xx  = np.linalg.pinv(Nm)
+    print("sigma_0: %f" % sigma_0)
+    Cov_xx  = np.linalg.inv(Nm)
     return self.x, Cov_xx, sigma_0, w
 
 def test_BatchGaussHelmertProblem():

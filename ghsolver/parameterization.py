@@ -8,7 +8,8 @@ Created on Wed Jun  7 14:32:19 2017
 import numpy as np
 import pycppad
 from numpy.testing import *
-from util import *
+from util import * 
+import scipy.linalg
 
 class LocalParameterization(object):
   def __init__(self):
@@ -143,7 +144,7 @@ def test_ProductParameterization():
                      np.arange(5)*2)
   assert_almost_equal(par.ComputeJacobian(np.arange(5)),
                      np.eye(5))
-  print "test_ProductParameterization passed "
+  print("test_ProductParameterization passed")
 
 #%%
 class SubsetParameterization(LocalParameterization):
@@ -157,7 +158,7 @@ class SubsetParameterization(LocalParameterization):
 
     self.jacobian = np.eye(self.global_size)[:,self.active_indice]
     if self.local_size == 0:
-      print "local_size is zero, you could use ConstantParameterization to fix all variable"
+      print("local_size is zero, you could use ConstantParameterization to fix all variable")
 
   def Plus(self, x, delta):
     x_ = x.copy()
@@ -184,7 +185,7 @@ def test_SubsetParameterization():
   assert(par.GlobalSize() == 3)
   assert(par.LocalSize()  == 1)
   assert( np.all( par.ComputeJacobian(None) == np.array([ [1],[0],[0] ]) ) )
-  print "test_SubsetParameterization passed "
+  print("test_SubsetParameterization passed")
 
 class ConstantParameterization(LocalParameterization):
   def __init__(self, size):
@@ -256,7 +257,7 @@ def test_AutoDiffLocalParameterization():
   par = MakeParameterization(SubSetPlus, x0, l0[:2 ])()
   assert_array_almost_equal(par.ComputeJacobian(x0), np.eye(3)[:,:2])
 
-  print "test_AutoDiffLocalParameterization passed "
+  print("test_AutoDiffLocalParameterization passed")
 #%% SE3Parameterization
 
 def skew(v):
@@ -266,7 +267,6 @@ def skew(v):
 def vee(R):
   return np.array([-R[1,2], R[0,2], -R[0,1]])
 
-import scipy
 class SE3Parameterization(LocalParameterization):
   """ se(3) = [t, omega]
   A tutorial on SE(3) transformation parameterizations and on-manifold optimization
@@ -333,7 +333,7 @@ def test_SE3Parameterization():
   dT = p.ComputeJacobian(x0).dot(dx)
   assert_array_almost_equal( SE3Parameterization.Vec12(T1-T0), dT, 2)
 
-  print "test_SE3Parameterization passed "
+  print("test_SE3Parameterization passed")
 
 def test_SE3Parameterization_solver():
   Vec = SE3Parameterization.Vec12
@@ -354,9 +354,9 @@ def test_SE3Parameterization_solver():
   except solver.CholmodNotPositiveDefiniteError:
     return
 
-  print fac
+  print(fac)
   assert_array_almost_equal(Mat(x), T0)
-  print "test_SE3Parameterization passed"
+  print("test_SE3Parameterization passed")
 
 #%% SphereParameterization
 
@@ -491,7 +491,7 @@ def test_SphereParameterization():
   # plus 0
   assert_array_almost_equal(x, param.Plus(x, np.r_[0,0,0.]))
 
-  auto_jac = solver.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
+  auto_jac = MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     # always on sphere
     assert_almost_equal(1, np.linalg.norm( param.Plus(x, np.random.rand(3) ) ) )
@@ -500,7 +500,7 @@ def test_SphereParameterization():
     assert_almost_equal( auto_jac(x_, np.zeros(3))[-1],
                          param.ComputeJacobian(x_) )
 
-  print "test_SphereParameterization passed "
+  print("test_SphereParameterization passed")
 
 def test_SphereParameterization_solve():
   pa = SphereParameterization(2)
@@ -526,7 +526,7 @@ def test_SphereParameterization_solve():
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs]), 1.2, decimal=1)
-  print "test_SphereParameterization_solve passed "
+  print("test_SphereParameterization_solve passed")
 
 
 
@@ -605,7 +605,7 @@ def test_HomogeneousParameterization():
   assert_array_almost_equal( x,
                              param.Plus(x, np.zeros(3) ) )
 
-  auto_jac = solver.MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
+  auto_jac = MakeJacobianFunction(param.Plus, x, 1e-7*np.ones(3))
   for i in range(10):
     v = 100*np.random.rand(3)
     # always on sphere
@@ -619,7 +619,7 @@ def test_HomogeneousParameterization():
     assert_almost_equal( auto_jac(x_, np.zeros(3))[-1],
                          param.ComputeJacobian(x_) )
 
-  print "test_HomogeneousParameterization passed "
+  print("test_HomogeneousParameterization passed")
 
 def test_HomogeneousParameterization_solve():
   pa = HomogeneousParameterization(3)
@@ -644,7 +644,7 @@ def test_HomogeneousParameterization_solve():
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
-  print "test_HomogeneousParameterization_solve passed "
+  print("test_HomogeneousParameterization_solve passed")
 
 def test_HomogeneousParameterization_solve2():
   pa = HomogeneousParameterization(3)
@@ -669,7 +669,7 @@ def test_HomogeneousParameterization_solve2():
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
   assert_array_almost_equal( np.mean( [pa.ToEuclidean(x_) for x_ in xs], axis=0 ), np.r_[120.0,120], decimal=1)
-  print "test_HomogeneousParameterization_solve passed "
+  print("test_HomogeneousParameterization_solve passed")
 
 #%% AngleAxisParameterization
 
@@ -791,7 +791,7 @@ def test_AngleAxisParameterization_solve():
     xs,le,facs[it] = solver.SolveWithGESparse(problem, maxit=30, fac=True)
 
   assert_almost_equal( np.mean(facs), 1.0, decimal=1)
-  print "test_AngleAxisParameterization_solve passed "
+  print("test_AngleAxisParameterization_solve passed")
 #%%
 class Quaternion(object):
   __slots__ = 'q'
@@ -799,7 +799,7 @@ class Quaternion(object):
   def __init__(self, q):
     self.q = q
 #    if np.sign(q[0]) == -1:
-#      print "negative Quaternion"
+#      print(negative Quaternion"
 
   @classmethod
   def FromRot(cls, M):
@@ -921,7 +921,7 @@ def test_Quaternion():
     assert_almost_equal( np.dot(q2.ToMulMatR(), q1.q), q12_true)
     assert_almost_equal( (q1*q2).q, q12_true)
 
-  print "test_Quaternion passed "
+  print("test_Quaternion passed")
 
 
 def QuaternionProduct(z,w):
@@ -984,7 +984,7 @@ def test_QuaternionParameterization():
 
   xs,le,facs = solver.SolveWithGESparseAsGM(problem, maxit=30, fac=True)
   assert_array_almost_equal(xs, l)
-  print "test_QuaternionParameterization passed "
+  print("test_QuaternionParameterization passed")
 
 
 if __name__ == '__main__':
@@ -992,14 +992,14 @@ if __name__ == '__main__':
 
   test_ProductParameterization()
   test_SubsetParameterization()
-  test_SE3Parameterization()
-  test_SE3Parameterization_solver()
+#  test_SE3Parameterization()
+#  test_SE3Parameterization_solver()
 
   test_AutoDiffLocalParameterization()
   test_SphereParameterization()
   test_HomogeneousParameterization()
   test_Quaternion()
-  if 0:
+  if 1:
     test_SphereParameterization_solve()
     test_HomogeneousParameterization_solve()
     test_AngleAxisParameterization_solve()

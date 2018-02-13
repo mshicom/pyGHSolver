@@ -526,7 +526,7 @@ class BatchCalibrationProblem(object):
         M_ba = dict_M_ba[key]
       else:
         M_ba = self.SolveAXBDirect(base, key)
-        print "Init guess for %s:\n%s" %(key, M_ba)
+        print( "Init guess for %s:\n%s" %(key, M_ba))
       P_ba = QuaternionPose.FromM(M_ba)
       P_ba.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = P_ba     # other <- base
@@ -542,7 +542,7 @@ class BatchCalibrationProblem(object):
     for trj in self.trajectory.values():
       assert isinstance(trj, AbsTrajectory)
       if not np.allclose( trj[0].M, np.eye(4) ):
-        print 'First pose is not Identity, please use trj.Rebase() to make so.'
+        print( 'First pose is not Identity, please use trj.Rebase() to make so.')
 
     # define constraint function
     num_sensors = len(self.trajectory)
@@ -581,7 +581,7 @@ class BatchCalibrationProblem(object):
         M_ba = dict_M_ba[key]
       else:
         M_ba = self.SolveAXXBDirect(base, key)
-        print "Init guess for %s:\n%s" %(key, M_ba)
+        print( "Init guess for %s:\n%s" %(key, M_ba))
       Pob = QuaternionPose.FromM(M_ba)
       Pob.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = Pob     # other <- base
@@ -636,7 +636,7 @@ class BatchCalibrationProblem(object):
         M_ba, M_vw = dict_M_ba[key]
       else:
         M_ba, M_vw = self.SolveAXYBDirect(base, key)
-        print "Init guess for %s:\n%s" %(key, M_ba)
+        print( "Init guess for %s:\n%s" %(key, M_ba))
       Pba = QuaternionPose.FromM(M_ba)
       Pba.AddToProblemAsParameter(problem, trj.slot-1, fix_rot, fix_x,fix_y,fix_z)
       Pvw = QuaternionPose.FromM(M_vw)
@@ -690,7 +690,7 @@ class BatchCalibrationProblem(object):
         M_ba = dict_M_ba[key]
       else:
         M_ba = self.SolveAXXBDirect(base, key)
-        print "Init guess for %s:\n%s" %(key, M_ba)
+        print( "Init guess for %s:\n%s" %(key, M_ba))
       P_ba = QuaternionPose.FromM(M_ba)
       P_ba.AddToProblemAsParameter(problem, trj.slot-1)
       self.calibration[key][base] = P_ba     # other <- base
@@ -749,7 +749,7 @@ if __name__ == '__main__':
       return [ deep_map(function, l) for l in list_of_list ]
 
     Mba_all = [np.eye(4)]+[ MfromRT(randsp(), randsp()) for _ in xrange(num_sensor-1) ] # other <- base
-    print Mba_all
+    print( Mba_all)
     dM_1   = [ MfromRT( d2r(10+5*np.random.rand(1))*randsp(), 0.5*np.random.rand(1) * randsp() ) for _ in xrange(num_seg)]
     dM_all = [ map(ConjugateM, dM_1, [M21]*num_seg ) for M21 in Mba_all ]
 
@@ -766,7 +766,7 @@ if __name__ == '__main__':
     fac = []
     for i in range(100):
       if 0:
-        print "A:"
+        print( "A:")
         calp_glb = BatchCalibrationProblem()
         for i in xrange(num_sensor):
           if 1:
@@ -779,7 +779,7 @@ if __name__ == '__main__':
         fac.append(sigma_0)
 
       if 0:
-        print "B:"
+        print( "B:")
         calp_abs = BatchCalibrationProblem()
         for i in xrange(num_sensor):
           calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], cov ).SimulateNoise()
@@ -788,7 +788,7 @@ if __name__ == '__main__':
         fac.append(sigma_0)
 
       if 1:
-        print "BB:"
+        print( "BB:")
         calp_abs = BatchCalibrationProblem()
         for i in xrange(num_sensor):
           calp_abs[i]= AbsTrajectory.FromPoseData( M_all[i], None ).Rebase(Mvw_all[i].dot(invT(Mba_all[i]))).SimulateNoise(cov)
@@ -797,7 +797,7 @@ if __name__ == '__main__':
         fac.append(sigma_0)
 
       if 0:
-        print "C:"
+        print( "C:")
         calp_rel = BatchCalibrationProblem()
         for i in xrange(num_sensor):
           if 0:
@@ -809,4 +809,4 @@ if __name__ == '__main__':
         fac.append(sigma_0)
     plt.close()
     plt.hist(fac,20)
-    print np.mean(fac)
+    print( np.mean(fac))

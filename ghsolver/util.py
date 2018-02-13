@@ -38,7 +38,7 @@ def check_magnitude(r):
 
 def MakeSequenceSlice(size_list, start=0):
   offsets = np.cumsum( [start] + list(size_list) )
-  return [slice(offsets[i], offsets[i+1]) for i in xrange(len(size_list))]
+  return [slice(offsets[i], offsets[i+1]) for i in range(len(size_list))]
 
 def MakeJacobianFunction(g, *args, **kwargs):
   split = kwargs.get('split', True)
@@ -119,15 +119,15 @@ def ErrorPropogationImplicit(cov_x, constaint_func, x, y=None):
       dG = J dx = 0
       dy = J NullSpace(J)*dx
   """
-  J = MakeJacobianFunction(func, x)(x)[0]
+  J = MakeJacobianFunction(constaint_func, x)(x)[0]
   Jn = NullMatrix(J)
   return Jn.dot(cov_x).dot(Jn.T)
 
 def Montacalo(f, x0, sigma, trial=10000):
-  dim_x, dim_y = len(np.atleast_1d(x)), len(np.atleast_1d(f(x0)))
+  dim_x, dim_y = len(np.atleast_1d(x0)), len(np.atleast_1d(f(x0)))
 
   y = np.empty((trial, dim_y))
-  for i in xrange(trial):
+  for i in range(trial):
     y[i] = f( x0 + sigma*np.random.randn(dim_x) )
   y_mean = np.mean(y, axis=0)
   y_cov = np.cov((y - y_mean).T)
